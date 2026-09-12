@@ -68,6 +68,34 @@ class ExtractorUnitTest {
     }
 
     /**
+     * Test 2.2b: Mock de búsqueda para Playlist de la comunidad y Playlist destacadas.
+     */
+    @Test
+    fun test2_2b_searchFiltersCommunityAndFeaturedPlaylists() = runBlocking {
+        val mockSource = mockk<YouTubeMusicSource>()
+        val mockPlaylists = listOf(
+            SongItem(
+                id = "PL_test_123",
+                title = "ACDC Best",
+                artistName = "Community User • 25 canciones",
+                durationSeconds = 25,
+                thumbnailUrl = "https://img.youtube.com/vi/default/hqdefault.jpg"
+            )
+        )
+
+        coEvery { mockSource.search("acdc", FilterType.COMMUNITY_PLAYLISTS) } returns mockPlaylists
+        coEvery { mockSource.search("acdc", FilterType.FEATURED_PLAYLISTS) } returns mockPlaylists
+
+        val community = mockSource.search("acdc", FilterType.COMMUNITY_PLAYLISTS)
+        assertEquals(1, community.size)
+        assertEquals("PL_test_123", community[0].id)
+
+        val featured = mockSource.search("acdc", FilterType.FEATURED_PLAYLISTS)
+        assertEquals(1, featured.size)
+        assertEquals("ACDC Best", featured[0].title)
+    }
+
+    /**
      * Test 2.3: Resolución de URL de stream: Verificar que el objeto devuelto contenga
      * un enlace HTTP válido y un bitrate mayor a 0.
      */

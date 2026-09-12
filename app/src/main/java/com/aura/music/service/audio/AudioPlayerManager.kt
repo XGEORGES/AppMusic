@@ -88,6 +88,7 @@ class AudioPlayerManager(
 
     var onInfiniteRadioTriggered: ((lastSongId: String) -> Unit)? = null
     var onSongTransitionTriggered: ((song: SongItem) -> Unit)? = null
+    var onPlayerErrorTriggered: ((song: SongItem, error: PlaybackException) -> Unit)? = null
 
     private val playerListener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -131,8 +132,10 @@ class AudioPlayerManager(
                 val uri = mediaItem?.localConfiguration?.uri?.toString() ?: ""
                 val isPlaceholder = uri.startsWith("https://youtube.com/watch?v=") ||
                         uri.startsWith("http://youtube.com/watch?v=")
-                if (isPlaceholder && song.localFilePath.isNullOrBlank()) {
+                val isExpired = isStreamUrlExpired(uri)
+                if ((isPlaceholder || isExpired) && song.localFilePath.isNullOrBlank()) {
                     player.pause()
+                    _isLoading.value = true
                 }
                 onSongTransitionTriggered?.invoke(song)
             }
@@ -140,16 +143,20 @@ class AudioPlayerManager(
         }
 
         override fun onPlayerError(error: PlaybackException) {
-            // Error de reproducción: el stream placeholder falló.
+            // Error de reproducción: el stream placeholder o expirado falló.
             // Usar pause() (NO stop) para mantener el foreground y los locks de red
-            // activos mientras onSongTransitionTriggered resuelve el stream real.
+            // activos mientras se resuelve el stream real.
             _isLoading.value = false
             val index = player.currentMediaItemIndex
             val currentList = _queue.value
             if (index in currentList.indices) {
                 val song = currentList[index]
                 player.pause()
-                onSongTransitionTriggered?.invoke(song)
+                if (onPlayerErrorTriggered != null) {
+                    onPlayerErrorTriggered?.invoke(song, error)
+                } else {
+                    onSongTransitionTriggered?.invoke(song)
+                }
             }
         }
 
@@ -162,11 +169,13 @@ class AudioPlayerManager(
         }
     }
 
-    fun prepareForLoading(song: SongItem) {
+    fun prepareForLoading(song: SongItem, resetPosition: Boolean = true) {
         // Pausar inmediatamente la canción anterior para evitar desincronización de audio
         player.pause()
         _currentSong.value = song
-        _currentPosition.value = 0L
+        if (resetPosition) {
+            _currentPosition.value = 0L
+        }
         _duration.value = if (song.durationSeconds > 0) song.durationSeconds * 1000L else 0L
         _isLoading.value = true
     }
@@ -376,20 +385,16 @@ class AudioPlayerManager(
 
         val isCurrentPlaceholder = existingUri.startsWith("https://youtube.com/watch?v=") ||
                 existingUri.startsWith("http://youtube.com/watch?v=")
+        val isCurrentExpired = isStreamUrlExpired(existingUri)
 
         if (isCurrent) {
-            if (isCurrentPlaceholder) {
-                // El item tiene URL placeholder → reemplazar y arrancar desde 0
-                player.replaceMediaItem(index, updatedMediaItem)
+            val shouldStartPlayback = isCurrentPlaceholder || isCurrentExpired || player.playerError != null || !player.isPlaying
+            player.replaceMediaItem(index, updatedMediaItem)
+            if (shouldStartPlayback) {
                 player.seekTo(index, 0L)
-                if (player.playbackState == Player.STATE_IDLE) {
-                    player.prepare()
-                }
+                player.prepare()
                 ensureServiceStarted()
                 player.play()
-            } else {
-                // Ya tiene URL real → actualizar silenciosamente sin interrumpir reproducción
-                player.replaceMediaItem(index, updatedMediaItem)
             }
         } else {
             // Item futuro en la cola → solo actualizar la URL
@@ -400,6 +405,9 @@ class AudioPlayerManager(
     fun playStream(song: SongItem, streamUrl: String) {
         ensureServiceStarted()
         _currentSong.value = song
+        if (song.localFilePath.isNullOrBlank()) {
+            _isLoading.value = true
+        }
         val mediaItem = songToMediaItem(song, streamUrl)
         val currentQueue = _queue.value
         val existingIndex = currentQueue.indexOfFirst { it.id == song.id }
@@ -409,6 +417,8 @@ class AudioPlayerManager(
             player.replaceMediaItem(existingIndex, mediaItem)
             if (player.currentMediaItemIndex != existingIndex) {
                 player.seekToDefaultPosition(existingIndex)
+            } else {
+                player.seekTo(existingIndex, 0L)
             }
             player.prepare()
             player.play()
@@ -418,6 +428,26 @@ class AudioPlayerManager(
             player.setMediaItem(mediaItem)
             player.prepare()
             player.play()
+        }
+    }
+
+    companion object {
+        fun isStreamUrlExpired(url: String?): Boolean {
+            if (url.isNullOrBlank()) return true
+            if (!url.startsWith("http://") && !url.startsWith("https://")) return false
+            try {
+                val uri = Uri.parse(url)
+                val expireStr = uri.getQueryParameter("expire")
+                if (!expireStr.isNullOrBlank()) {
+                    val expireSec = expireStr.toLongOrNull() ?: 0L
+                    val currentSec = System.currentTimeMillis() / 1000L
+                    // Si faltan menos de 5 minutos (300 segundos) para que expire o ya expiró
+                    if (currentSec >= (expireSec - 300L)) {
+                        return true
+                    }
+                }
+            } catch (_: Exception) {}
+            return false
         }
     }
 }

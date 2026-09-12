@@ -40,6 +40,8 @@ open class PlayerRepository @Inject constructor(
     val isInfiniteRadioEnabled: StateFlow<Boolean> = audioPlayerManager.isInfiniteRadioEnabled
 
     private var isFetchingRadio = false
+    private var lastErrorSongId: String? = null
+    private var errorRetryCount = 0
 
     val queue: StateFlow<List<SongEntity>> = audioPlayerManager.queue
         .map { list -> list.map { it.toEntity() } }
@@ -65,33 +67,61 @@ open class PlayerRepository @Inject constructor(
                     songDao.updatePlayCount(songItem.id)
                 } catch (_: Exception) {}
 
-                // Si la canción no es local, siempre asegurar que ExoPlayer tenga el stream real
+                // Si la canción no es local, siempre asegurar que ExoPlayer tenga el stream real y vigente
                 if (songItem.localFilePath.isNullOrBlank()) {
-                    val cachedUrl = streamUrlCache[songItem.id]
+                    val cachedUrl = getValidCachedStream(songItem.id)
                     if (!cachedUrl.isNullOrBlank()) {
-                        // Ya tenemos la URL: actualizar inmediatamente en el Main thread
                         audioPlayerManager.updateMediaItemStream(songItem.id, cachedUrl)
                     } else {
-                        // Resolver el stream en background
+                        // Resolver el stream en background mostrando el estado de carga
+                        audioPlayerManager.prepareForLoading(songItem)
                         scope.launch(Dispatchers.IO) {
                             try {
                                 val streamInfo = youTubeMusicSource.getStreamUrl(songItem.id)
-                                streamUrlCache[songItem.id] = streamInfo.url
+                                putStreamUrlCache(songItem.id, streamInfo.url)
                                 kotlinx.coroutines.withContext(Dispatchers.Main) {
                                     audioPlayerManager.updateMediaItemStream(songItem.id, streamInfo.url)
                                 }
                             } catch (e: Exception) {
                                 e.printStackTrace()
+                                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                    audioPlayerManager.cancelLoading()
+                                    // Si la carga falla en transición automática, avanzar a la siguiente pista
+                                    seekToNext()
+                                }
                             }
                         }
                     }
                 }
 
-                // Disparar precarga de las siguientes canciones de la cola activa
+                // Disparar precarga de la siguiente canción de la cola activa (1 pista adelante)
                 val currentQueue = queue.value
                 val currentIndex = currentQueue.indexOfFirst { it.id == songItem.id }
                 if (currentIndex != -1) {
                     preloadStreams(currentQueue, priorityIndex = currentIndex + 1)
+                }
+            }
+        }
+
+        // Configurar callback de error de reproducción para reintentar con stream fresco
+        audioPlayerManager.onPlayerErrorTriggered = { songItem, error ->
+            scope.launch {
+                streamUrlCache.remove(songItem.id)
+                if (lastErrorSongId == songItem.id) {
+                    errorRetryCount++
+                } else {
+                    lastErrorSongId = songItem.id
+                    errorRetryCount = 1
+                }
+
+                if (errorRetryCount <= 2 && songItem.localFilePath.isNullOrBlank()) {
+                    playSong(songItem.toEntity())
+                } else {
+                    errorRetryCount = 0
+                    lastErrorSongId = null
+                    audioPlayerManager.cancelLoading()
+                    // Si la canción falló 2 veces (borrada, bloqueada o caída), saltar automáticamente
+                    seekToNext()
                 }
             }
         }
@@ -108,10 +138,14 @@ open class PlayerRepository @Inject constructor(
                             val newSongs = related.filter { it.id !in currentIds }
                             if (newSongs.isNotEmpty()) {
                                 withContext(Dispatchers.Main) {
+                                    val previousItemCount = audioPlayerManager.player.mediaItemCount
                                     audioPlayerManager.addToQueue(newSongs)
                                     if (audioPlayerManager.player.playbackState == Player.STATE_ENDED) {
-                                        audioPlayerManager.player.prepare()
-                                        audioPlayerManager.player.play()
+                                        val newFirstIndex = previousItemCount
+                                        val currentQ = audioPlayerManager.queue.value
+                                        if (newFirstIndex in currentQ.indices) {
+                                            playSong(currentQ[newFirstIndex].toEntity())
+                                        }
                                     }
                                 }
                             }
@@ -138,33 +172,65 @@ open class PlayerRepository @Inject constructor(
         }
     }
 
+    data class CachedStream(
+        val url: String,
+        val fetchedAtMs: Long = System.currentTimeMillis()
+    ) {
+        fun isExpired(): Boolean {
+            // Expiración por tiempo: máximo 3 horas (para evitar fallos por cambio de IP o expiración del token)
+            if (System.currentTimeMillis() - fetchedAtMs > 3 * 60 * 60 * 1000L) {
+                return true
+            }
+            // Expiración por parámetro 'expire' de YouTube
+            try {
+                val uri = android.net.Uri.parse(url)
+                val expireStr = uri.getQueryParameter("expire")
+                if (!expireStr.isNullOrBlank()) {
+                    val expireSec = expireStr.toLongOrNull() ?: 0L
+                    val currentSec = System.currentTimeMillis() / 1000L
+                    if (currentSec >= (expireSec - 300L)) {
+                        return true
+                    }
+                }
+            } catch (_: Exception) {}
+            return false
+        }
+    }
+
     private var playJob: kotlinx.coroutines.Job? = null
     private var prefetchJob: kotlinx.coroutines.Job? = null
-    private val streamUrlCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val streamUrlCache = java.util.concurrent.ConcurrentHashMap<String, CachedStream>()
+
+    fun getValidCachedStream(songId: String): String? {
+        val cached = streamUrlCache[songId] ?: return null
+        if (cached.isExpired()) {
+            streamUrlCache.remove(songId)
+            return null
+        }
+        return cached.url
+    }
+
+    fun putStreamUrlCache(songId: String, url: String) {
+        if (url.isNotBlank()) {
+            streamUrlCache[songId] = CachedStream(url)
+        }
+    }
 
     fun preloadStreams(songs: List<SongEntity>, priorityIndex: Int = 0) {
         prefetchJob?.cancel()
         prefetchJob = scope.launch(Dispatchers.IO) {
             if (songs.isEmpty()) return@launch
-            // Primero pre-resolver canciones prioritarias (la seleccionada, la siguiente, la anterior)
-            val prioritizedList = mutableListOf<SongEntity>()
-            if (priorityIndex in songs.indices) prioritizedList.add(songs[priorityIndex])
-            if (priorityIndex + 1 in songs.indices) prioritizedList.add(songs[priorityIndex + 1])
-            if (priorityIndex - 1 in songs.indices) prioritizedList.add(songs[priorityIndex - 1])
-            if (priorityIndex + 2 in songs.indices) prioritizedList.add(songs[priorityIndex + 2])
-
-            // Añadir el resto de la lista (hasta un máximo prudente de 8 canciones por delante)
-            val remaining = songs.filter { song -> !prioritizedList.any { it.id == song.id } }.take(6)
-            prioritizedList.addAll(remaining)
-
-            for (song in prioritizedList) {
-                if (song.localFilePath.isNullOrBlank() && !streamUrlCache.containsKey(song.id)) {
+            // Precargar únicamente la siguiente canción inmediata (1 pista adelante)
+            // Evita vencimiento anticipado de URLs y saturación/rate-limiting en YouTube
+            val nextIndex = priorityIndex
+            if (nextIndex in songs.indices) {
+                val nextSong = songs[nextIndex]
+                if (nextSong.localFilePath.isNullOrBlank() && getValidCachedStream(nextSong.id) == null) {
                     try {
-                        val stream = youTubeMusicSource.getStreamUrl(song.id)
-                        streamUrlCache[song.id] = stream.url
-                        // updateMediaItemStream llama métodos de ExoPlayer: debe ejecutarse en Main thread
+                        val stream = youTubeMusicSource.getStreamUrl(nextSong.id)
+                        putStreamUrlCache(nextSong.id, stream.url)
                         kotlinx.coroutines.withContext(Dispatchers.Main) {
-                            audioPlayerManager.updateMediaItemStream(song.id, stream.url)
+                            audioPlayerManager.updateMediaItemStream(nextSong.id, stream.url)
                         }
                     } catch (_: Exception) {}
                 }
@@ -205,9 +271,10 @@ open class PlayerRepository @Inject constructor(
             return
         }
 
-        // Si el stream ya está en memoria caché, reproducir de inmediato (0s de retardo)
-        val cachedUrl = streamUrlCache[song.id]
+        // Si el stream ya está en memoria caché y es válido (no expirado), reproducir de inmediato
+        val cachedUrl = getValidCachedStream(song.id)
         if (!cachedUrl.isNullOrBlank()) {
+            audioPlayerManager.prepareForLoading(item, resetPosition = false)
             audioPlayerManager.playStream(item, cachedUrl)
             scope.launch {
                 try { songDao.updatePlayCount(song.id) } catch (_: Exception) {}
@@ -232,10 +299,10 @@ open class PlayerRepository @Inject constructor(
                 val streamInfo = kotlinx.coroutines.withContext(Dispatchers.IO) {
                     youTubeMusicSource.getStreamUrl(song.id)
                 }
-                streamUrlCache[song.id] = streamInfo.url
+                putStreamUrlCache(song.id, streamInfo.url)
                 audioPlayerManager.playStream(item, streamInfo.url)
 
-                // Disparar precarga de las siguientes canciones de la cola activa
+                // Disparar precarga de la siguiente canción de la cola activa (1 pista adelante)
                 val currentQueue = queue.value
                 val currentIndex = currentQueue.indexOfFirst { it.id == song.id }
                 if (currentIndex != -1) {
@@ -244,6 +311,8 @@ open class PlayerRepository @Inject constructor(
             } catch (e: Exception) {
                 e.printStackTrace()
                 audioPlayerManager.cancelLoading()
+                // Si la resolución falló (video restringido o caído), saltar automáticamente a la siguiente pista
+                seekToNext()
             }
         }
     }
@@ -251,9 +320,9 @@ open class PlayerRepository @Inject constructor(
     open fun setQueue(songs: List<SongEntity>, startIndex: Int = 0) {
         if (songs.isEmpty()) return
         val items = songs.map { song ->
-            val cached = streamUrlCache[song.id]
+            val cached = getValidCachedStream(song.id)
             if (!cached.isNullOrBlank() && song.localFilePath.isNullOrBlank()) {
-                SongItem.fromEntity(song) // audioPlayerManager can use cached stream
+                SongItem.fromEntity(song)
             } else {
                 SongItem.fromEntity(song)
             }
@@ -261,7 +330,7 @@ open class PlayerRepository @Inject constructor(
         audioPlayerManager.setQueue(items, startIndex, autoPlay = false)
         val initialSong = songs.getOrNull(startIndex) ?: songs.first()
         playSong(initialSong)
-        // Precargar en segundo plano las siguientes de la cola
+        // Precargar en segundo plano la siguiente de la cola
         preloadStreams(songs, priorityIndex = startIndex + 1)
     }
 
@@ -291,7 +360,57 @@ open class PlayerRepository @Inject constructor(
     }
 
     open fun togglePlayPause() {
-        audioPlayerManager.togglePlayPause()
+        if (audioPlayerManager.isLoading.value) {
+            return
+        }
+
+        if (audioPlayerManager.isPlaying.value) {
+            audioPlayerManager.pause()
+            return
+        }
+
+        val currentSong = _currentPlayingSong.value
+            ?: audioPlayerManager.currentSong.value?.toEntity()
+            ?: queue.value.firstOrNull()
+            ?: return
+
+        val player = audioPlayerManager.player
+        val currentMediaItem = player.currentMediaItem
+        val currentUri = currentMediaItem?.localConfiguration?.uri?.toString() ?: ""
+        val isPlaceholder = currentUri.startsWith("https://youtube.com/watch?v=") ||
+                currentUri.startsWith("http://youtube.com/watch?v=") ||
+                currentUri.isBlank()
+        val isExpired = AudioPlayerManager.isStreamUrlExpired(currentUri)
+
+        val isReadyToResume = player.playbackState == Player.STATE_READY &&
+                !isPlaceholder &&
+                !isExpired &&
+                player.playerError == null &&
+                (currentMediaItem?.mediaId == currentSong.id)
+
+        if (isReadyToResume) {
+            audioPlayerManager.ensureServiceStarted()
+            player.play()
+        } else {
+            streamUrlCache.remove(currentSong.id)
+
+            val currentPos = audioPlayerManager.currentPosition.value
+            val totalDuration = audioPlayerManager.duration.value
+            val shouldRestorePosition = currentPos > 1000L && (totalDuration <= 0L || currentPos < totalDuration - 2000L)
+
+            playSong(currentSong)
+
+            if (shouldRestorePosition) {
+                scope.launch {
+                    audioPlayerManager.isPlaying.collect { playing ->
+                        if (playing) {
+                            audioPlayerManager.seekTo(currentPos)
+                            return@collect
+                        }
+                    }
+                }
+            }
+        }
     }
 
     open fun seekTo(positionMs: Long) {
@@ -305,18 +424,35 @@ open class PlayerRepository @Inject constructor(
         if (nextIndex in q.indices) {
             playSong(q[nextIndex])
         } else {
-            audioPlayerManager.seekToNext()
+            // Fin de la cola: volver al inicio de la playlist (loop continuo)
+            if (q.isNotEmpty()) {
+                playSong(q.first())
+            } else {
+                audioPlayerManager.seekToNext()
+            }
         }
     }
 
     open fun seekToPrevious() {
+        val currentPos = audioPlayerManager.currentPosition.value
+        // Si han transcurrido más de 3 segundos, reiniciar la pista actual
+        if (currentPos > 3000L) {
+            audioPlayerManager.seekTo(0L)
+            return
+        }
+
         val q = queue.value
         val current = currentPlayingSong.value
         val prevIndex = if (current != null) q.indexOfFirst { it.id == current.id } - 1 else 0
         if (prevIndex in q.indices) {
             playSong(q[prevIndex])
         } else {
-            audioPlayerManager.seekToPrevious()
+            // Si está en la primera canción, envolver al final de la playlist
+            if (q.isNotEmpty()) {
+                playSong(q.last())
+            } else {
+                audioPlayerManager.seekToPrevious()
+            }
         }
     }
 

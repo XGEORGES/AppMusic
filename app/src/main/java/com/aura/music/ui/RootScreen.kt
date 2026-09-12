@@ -25,6 +25,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -94,9 +96,9 @@ fun RootScreen(
                     )
                 }
 
-                // Barra de navegación con 3 destinos (Explorar, Buscar, Biblioteca)
+                // Barra de navegación con 3 destinos (Principal, Buscar, Biblioteca)
                 NavigationBar(
-                    containerColor = DarkSurface,
+                    containerColor = OledBlack,
                     tonalElevation = 0.dp
                 ) {
                     NavigationDestination.entries.forEach { destination ->
@@ -106,22 +108,23 @@ fun RootScreen(
                             onClick = { currentDestination = destination },
                             icon = {
                                 Icon(
-                                    imageVector = destination.icon,
+                                    imageVector = if (selected) destination.icon else destination.unselectedIcon,
                                     contentDescription = destination.title
                                 )
                             },
                             label = {
                                 Text(
                                     text = destination.title,
-                                    fontSize = 11.sp
+                                    fontSize = 11.sp,
+                                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
                                 )
                             },
                             colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = MaterialTheme.colorScheme.primary,
-                                selectedTextColor = MaterialTheme.colorScheme.primary,
-                                unselectedIconColor = TextMuted,
-                                unselectedTextColor = TextMuted,
-                                indicatorColor = DarkSurface
+                                selectedIconColor = Color.White,
+                                selectedTextColor = Color.White,
+                                unselectedIconColor = Color.White,
+                                unselectedTextColor = Color.White.copy(alpha = 0.7f),
+                                indicatorColor = Color.Transparent
                             )
                         )
                     }
@@ -148,7 +151,10 @@ fun RootScreen(
                 NavigationDestination.SEARCH -> {
                     SearchScreen(
                         viewModel = searchViewModel,
-                        onSongClick = { song -> playerViewModel.playSong(song) }
+                        onSongClick = { song -> playerViewModel.playSong(song) },
+                        onPlayNext = { song -> playerViewModel.playNext(song) },
+                        onStartMix = { song -> playerViewModel.startMix(song) },
+                        onPinToShortcuts = { song -> exploreViewModel.pinToShortcuts(song) }
                     )
                 }
                 NavigationDestination.LIBRARY -> {

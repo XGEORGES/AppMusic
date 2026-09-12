@@ -18,6 +18,7 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.aura.music.MainActivity
 import com.aura.music.R
+import com.aura.music.data.repository.PlayerRepository
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 
@@ -29,6 +30,9 @@ class PlaybackService : MediaSessionService() {
 
     @Inject
     lateinit var audioPlayerManager: AudioPlayerManager
+
+    @Inject
+    lateinit var playerRepository: PlayerRepository
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
@@ -80,12 +84,13 @@ class PlaybackService : MediaSessionService() {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 when (playbackState) {
                     Player.STATE_BUFFERING -> {
-                        if (audioPlayerManager.player.playWhenReady) {
-                            acquireLocks()
-                            updateNotification()
-                        }
+                        acquireLocks()
+                        updateNotification()
                     }
                     Player.STATE_READY -> {
+                        if (audioPlayerManager.player.isPlaying) {
+                            acquireLocks()
+                        }
                         updateNotification()
                     }
                     Player.STATE_ENDED -> {
@@ -97,7 +102,8 @@ class PlaybackService : MediaSessionService() {
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                // Actualizar notificación cuando cambia de canción
+                // Mantener locks activos durante transición de canciones
+                acquireLocks()
                 updateNotification()
             }
         })
@@ -106,12 +112,12 @@ class PlaybackService : MediaSessionService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
 
-        // Manejar acciones de los botones de la notificación
+        // Manejar acciones de los botones de la notificación a través del PlayerRepository
         when (intent?.action) {
-            ACTION_PLAY     -> audioPlayerManager.play()
-            ACTION_PAUSE    -> audioPlayerManager.pause()
-            ACTION_NEXT     -> audioPlayerManager.seekToNext()
-            ACTION_PREVIOUS -> audioPlayerManager.seekToPrevious()
+            ACTION_PLAY     -> playerRepository.togglePlayPause()
+            ACTION_PAUSE    -> playerRepository.togglePlayPause()
+            ACTION_NEXT     -> playerRepository.seekToNext()
+            ACTION_PREVIOUS -> playerRepository.seekToPrevious()
         }
 
         if (audioPlayerManager.player.isPlaying) {
@@ -142,9 +148,15 @@ class PlaybackService : MediaSessionService() {
         if (song == null && player.mediaItemCount == 0) return
 
         val notification = buildNotification()
-        // startForeground mantiene el servicio en primer plano Y muestra la notificación
-        startForeground(NOTIFICATION_ID, notification)
-        // También notificar directamente para actualizar el estado en tiempo real
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
         notificationManager?.notify(NOTIFICATION_ID, notification)
     }
 
@@ -219,7 +231,7 @@ class PlaybackService : MediaSessionService() {
         if (wakeLock?.isHeld != true) {
             val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
             wakeLock = powerManager?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GeorgeMusic:PlaybackWakeLock")
-            wakeLock?.acquire(30 * 60 * 1000L /* 30 min max */)
+            wakeLock?.acquire()
         }
 
         if (wifiLock?.isHeld != true) {

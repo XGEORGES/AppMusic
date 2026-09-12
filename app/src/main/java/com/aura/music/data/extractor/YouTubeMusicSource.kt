@@ -40,9 +40,12 @@ open class YouTubeMusicSource(
         withContext(Dispatchers.IO) {
             val qhFactory = ServiceList.YouTube.searchQHFactory
             val filterList = when (filter) {
-                FilterType.SONGS -> listOf("videos")
+                FilterType.SONGS -> listOf("music_songs")
+                FilterType.COMMUNITY_PLAYLISTS -> listOf("playlists")
+                FilterType.FEATURED_PLAYLISTS -> listOf("music_playlists")
                 FilterType.PLAYLISTS -> listOf("playlists")
                 FilterType.ARTISTS -> listOf("channels")
+                FilterType.ALBUMS -> listOf("music_albums")
                 else -> emptyList()
             }
 
@@ -52,8 +55,15 @@ open class YouTubeMusicSource(
                 qhFactory.fromQuery(query, filterList, "")
             }
 
-            val searchInfo = SearchInfo.getInfo(ServiceList.YouTube, queryHandler)
-            val items = searchInfo.relatedItems
+            var searchInfo = SearchInfo.getInfo(ServiceList.YouTube, queryHandler)
+            var items = searchInfo.relatedItems
+
+            // Fallback para canciones en caso de que music_songs no devuelva resultados
+            if (filter == FilterType.SONGS && items.isEmpty()) {
+                val fallbackHandler = qhFactory.fromQuery(query, listOf("videos"), "")
+                val fallbackInfo = SearchInfo.getInfo(ServiceList.YouTube, fallbackHandler)
+                items = fallbackInfo.relatedItems
+            }
 
             items.mapNotNull { item ->
                 when (item) {
@@ -159,7 +169,8 @@ open class YouTubeMusicSource(
         } else {
             rawUrl
         }
-        val thumb = item.thumbnails?.firstOrNull()?.url
+        val thumb = item.thumbnails?.maxByOrNull { it.width }?.url
+            ?: item.thumbnails?.firstOrNull()?.url
             ?: "https://img.youtube.com/vi/default/hqdefault.jpg"
 
         val countStr = if (item.streamCount > 0) " (${item.streamCount} canciones)" else ""
