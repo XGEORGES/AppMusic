@@ -2,6 +2,7 @@ package com.aura.music.core.di
 
 import com.aura.music.core.network.DownloaderImpl
 import com.aura.music.data.extractor.YouTubeMusicSource
+import com.aura.music.core.network.NetworkTimeInterceptor
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -17,8 +18,9 @@ object NetworkModule {
 
     @Provides
     @Singleton
-    fun provideOkHttpClient(): OkHttpClient {
+    fun provideOkHttpClient(networkTimeInterceptor: NetworkTimeInterceptor): OkHttpClient {
         return OkHttpClient.Builder()
+            .addInterceptor(networkTimeInterceptor)
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .followRedirects(true)

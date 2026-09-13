@@ -68,55 +68,22 @@ class ExploreViewModel @Inject constructor(
 
     init {
         loadHomeScreenData()
-        observeUserPlaylists()
+        observeUserDataAndPlaylists()
     }
 
-    private fun observeUserPlaylists() {
+    private fun observeUserDataAndPlaylists() {
         viewModelScope.launch {
             userPlaylists.collect { playlists ->
-                if (playlists.isNotEmpty()) {
-                    // Seleccionar una playlist aleatoria del usuario cada vez que cambien o roten
-                    val randomPlaylist = playlists.random()
-                    _similarTitle.value = randomPlaylist.name
-                    // Cargar recomendaciones basadas en esa playlist rotada del usuario
-                    launch(Dispatchers.IO) {
-                        try {
-                            musicRepository.search("${randomPlaylist.name} Mix", FilterType.PLAYLISTS).collect { similar ->
-                                _similarPlaylists.value = similar.take(8)
-                            }
-                        } catch (_: Exception) {}
-                    }
-                } else {
-                    // Si el usuario no tiene ninguna playlist guardada, ocultar "SIMILARES A"
-                    _similarTitle.value = null
-                    _similarPlaylists.value = emptyList()
-                }
+                updateSimilarSection(playlists)
             }
         }
     }
 
     fun onRefreshScreen() {
+        loadShortcuts()
         rotateQuickPicks()
-        rotateSimilarSection()
+        updateSimilarSection()
         loadLongAudioMixes()
-    }
-
-    private fun rotateSimilarSection() {
-        val currentPlaylists = userPlaylists.value
-        if (currentPlaylists.isNotEmpty()) {
-            val randomPlaylist = currentPlaylists.random()
-            _similarTitle.value = randomPlaylist.name
-            viewModelScope.launch(Dispatchers.IO) {
-                try {
-                    musicRepository.search("${randomPlaylist.name} Mix", FilterType.PLAYLISTS).collect { similar ->
-                        _similarPlaylists.value = similar.take(8)
-                    }
-                } catch (_: Exception) {}
-            }
-        } else {
-            _similarTitle.value = null
-            _similarPlaylists.value = emptyList()
-        }
     }
 
     fun selectChip(chip: String) {
@@ -144,39 +111,99 @@ class ExploreViewModel @Inject constructor(
         viewModelScope.launch(Dispatchers.IO) {
             _isLoading.value = true
             try {
-                // 1. Cargar Accesos Directos (hasta 27 canciones para 3 páginas de 9 cada una)
-                musicRepository.search("Top Hits Hits Mix", FilterType.PLAYLISTS).collect { playlists ->
-                    _shortcutItems.value = playlists.take(27)
+                loadShortcuts()
+                rotateQuickPicks()
+                updateSimilarSection()
+                loadLongAudioMixes()
+            } catch (_: Exception) {
+            } finally {
+                _isLoading.value = false
+            }
+        }
+    }
+
+    private fun loadShortcuts() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val topPlayed = songDao.getTopPlayedSync(27)
+                val favorites = songDao.getFavoritesSync()
+                // Prioridad absoluta al usuario: canciones que ha marcado o reproducido
+                val userSongs = (favorites + topPlayed).distinctBy { it.id }.take(27)
+
+                if (userSongs.isNotEmpty()) {
+                    if (userSongs.size >= 9) {
+                        _shortcutItems.value = userSongs
+                    } else {
+                        // Completar la cuadrícula si tiene menos de 9 canciones locales
+                        var fallbackSongs = emptyList<SongEntity>()
+                        try {
+                            musicRepository.search("Top Hits Pop Latino y Global", FilterType.SONGS).collect { songs ->
+                                fallbackSongs = songs.filter { fb -> !userSongs.any { it.id == fb.id } }
+                            }
+                        } catch (_: Exception) {}
+                        _shortcutItems.value = (userSongs + fallbackSongs).take(9)
+                    }
+                } else {
+                    // Instalación desde cero (0 historial): Cargar éxitos populares (Latino + Global)
+                    musicRepository.search("Top Exitos Pop Latino y Global Hits", FilterType.SONGS).collect { songs ->
+                        _shortcutItems.value = songs.take(27)
+                    }
                 }
             } catch (_: Exception) {}
+        }
+    }
 
+    private fun updateSimilarSection(playlists: List<PlaylistEntity> = userPlaylists.value) {
+        viewModelScope.launch(Dispatchers.IO) {
             try {
-                // 2. Cargar Selección rápida rotativa
-                rotateQuickPicks()
-            } catch (_: Exception) {}
+                val topPlayed = songDao.getTopPlayedSync(15)
 
-            try {
-                // 3. Cargar Audios de larga duración basados en canciones o playlists escuchadas
-                loadLongAudioMixes()
+                if (playlists.isNotEmpty()) {
+                    // Caso 1: El usuario tiene playlists creadas
+                    val randomPlaylist = playlists.random()
+                    _similarTitle.value = randomPlaylist.name
+                    musicRepository.search("${randomPlaylist.name} Mix", FilterType.PLAYLISTS).collect { similar ->
+                        _similarPlaylists.value = similar.take(8)
+                    }
+                } else if (topPlayed.isNotEmpty()) {
+                    // Caso 2: El usuario ha escuchado canciones -> Basar en su artista o tema favorito
+                    val sampleSong = topPlayed.random()
+                    val artist = sampleSong.artistName.ifBlank { sampleSong.title }
+                    _similarTitle.value = artist
+                    musicRepository.search("$artist Mix", FilterType.PLAYLISTS).collect { similar ->
+                        _similarPlaylists.value = similar.take(8)
+                    }
+                } else {
+                    // Caso 3: Usuario nuevo -> Tendencias del momento
+                    _similarTitle.value = "Tendencias de Hoy"
+                    musicRepository.search("Top Playlists Exitos Pop Latino Global", FilterType.PLAYLISTS).collect { popular ->
+                        _similarPlaylists.value = popular.take(8)
+                    }
+                }
             } catch (_: Exception) {}
-
-            _isLoading.value = false
         }
     }
 
     private fun loadLongAudioMixes() {
         viewModelScope.launch(Dispatchers.IO) {
-            val topPlayed = songDao.getTopPlayedSync(10)
-            val query = if (topPlayed.isNotEmpty()) {
-                val sampleSong = topPlayed.random()
-                "${sampleSong.artistName} Extended Mix"
-            } else if (userPlaylists.value.isNotEmpty()) {
-                "${userPlaylists.value.random().name} Long Mix Extended"
-            } else {
-                "Full Album 80s 90s Disco MegaMix Extended"
-            }
-
             try {
+                val topPlayed = songDao.getTopPlayedSync(10)
+                val playlists = userPlaylists.value
+
+                val query = if (topPlayed.isNotEmpty()) {
+                    val sampleSong = topPlayed.random()
+                    "${sampleSong.artistName} Extended Mix"
+                } else if (playlists.isNotEmpty()) {
+                    "${playlists.random().name} Long Mix Extended"
+                } else {
+                    val fallbackMixes = listOf(
+                        "MegaMix Exitos 80s 90s Pop Rock En Vivo",
+                        "Mix Pop Latino Grandes Exitos Extended",
+                        "Top Hits Global MegaMix Extended Session"
+                    )
+                    fallbackMixes.random()
+                }
+
                 musicRepository.search(query, FilterType.SONGS).collect { mixes ->
                     _longAudioMixes.value = mixes.take(8)
                 }
@@ -186,22 +213,29 @@ class ExploreViewModel @Inject constructor(
 
     fun rotateQuickPicks() {
         viewModelScope.launch(Dispatchers.IO) {
-            val topPlayed = songDao.getTopPlayedSync(20)
-            val picks = if (topPlayed.isNotEmpty()) {
-                topPlayed.shuffled().take(8)
-            } else {
-                var loaded = emptyList<SongEntity>()
-                try {
-                    musicRepository.search("Viral Hits Pop Rock", FilterType.SONGS).collect { songs ->
-                        loaded = songs.shuffled().take(8)
-                    }
-                } catch (_: Exception) {}
-                loaded
-            }
-            _quickPicks.value = picks
-            if (picks.isNotEmpty()) {
-                playerRepository.preloadStreams(picks.take(4))
-            }
+            try {
+                val topPlayed = songDao.getTopPlayedSync(20)
+                val picks = if (topPlayed.isNotEmpty()) {
+                    topPlayed.shuffled().take(8)
+                } else {
+                    var loaded = emptyList<SongEntity>()
+                    val queries = listOf(
+                        "Top Canciones Exitos Pop Latino",
+                        "Billboard Top Global Hits",
+                        "Exitos Urbanos y Pop Viral"
+                    )
+                    try {
+                        musicRepository.search(queries.random(), FilterType.SONGS).collect { songs ->
+                            loaded = songs.shuffled().take(8)
+                        }
+                    } catch (_: Exception) {}
+                    loaded
+                }
+                _quickPicks.value = picks
+                if (picks.isNotEmpty()) {
+                    playerRepository.preloadStreams(picks.take(4))
+                }
+            } catch (_: Exception) {}
         }
     }
 

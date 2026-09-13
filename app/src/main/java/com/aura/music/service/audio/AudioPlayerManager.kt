@@ -13,6 +13,8 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -25,10 +27,38 @@ import kotlinx.coroutines.flow.asStateFlow
 @OptIn(UnstableApi::class)
 class AudioPlayerManager(
     val context: Context,
-    val player: Player = run {
+    playerInstance: Player? = null
+) {
+    @Volatile
+    var streamResolver: ((songId: String) -> String?)? = null
+
+    val player: Player = playerInstance ?: run {
         val cacheFactory = MediaCacheManager.createCacheDataSourceFactory(context)
+        val resolvingFactory = ResolvingDataSource.Factory(
+            cacheFactory,
+            object : ResolvingDataSource.Resolver {
+                override fun resolveDataSpec(dataSpec: DataSpec): DataSpec {
+                    val uri = dataSpec.uri
+                    val uriString = uri.toString()
+                    if (isPlaceholderUrl(uriString)) {
+                        val songId = uri.getQueryParameter("v")
+                            ?: uriString.substringAfter("watch?v=", "").substringBefore("&")
+                        if (songId.isNotBlank()) {
+                            val resolvedUrl = streamResolver?.invoke(songId)
+                                ?: globalStreamResolver?.invoke(songId)
+                            if (!resolvedUrl.isNullOrBlank()) {
+                                return dataSpec.buildUpon()
+                                    .setUri(Uri.parse(resolvedUrl))
+                                    .build()
+                            }
+                        }
+                    }
+                    return dataSpec
+                }
+            }
+        )
         val mediaSourceFactory = DefaultMediaSourceFactory(context)
-            .setDataSourceFactory(cacheFactory)
+            .setDataSourceFactory(resolvingFactory)
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 1500, // minBufferMs (>= bufferForPlaybackAfterRebufferMs)
@@ -52,7 +82,6 @@ class AudioPlayerManager(
             .setLooper(Looper.getMainLooper())
             .build()
     }
-) {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private val _currentSong = MutableStateFlow<SongItem?>(null)
@@ -88,6 +117,7 @@ class AudioPlayerManager(
 
     var onInfiniteRadioTriggered: ((lastSongId: String) -> Unit)? = null
     var onSongTransitionTriggered: ((song: SongItem) -> Unit)? = null
+    var onSongEndedTriggered: (() -> Unit)? = null
     var onPlayerErrorTriggered: ((song: SongItem, error: PlaybackException) -> Unit)? = null
 
     private val playerListener = object : Player.Listener {
@@ -110,6 +140,7 @@ class AudioPlayerManager(
                 Player.STATE_ENDED -> {
                     _isLoading.value = false
                     checkInfiniteRadioTrigger(isEnd = true)
+                    onSongEndedTriggered?.invoke()
                 }
                 Player.STATE_IDLE -> {
                     _isLoading.value = false
@@ -126,17 +157,6 @@ class AudioPlayerManager(
             if (index in currentList.indices) {
                 val song = currentList[index]
                 _currentSong.value = song
-                // Si el item actual tiene una URL placeholder (no un stream real),
-                // pausar (NO stop) antes de que ExoPlayer intente cargarla y falle.
-                // pause() mantiene el foreground y los locks de red activos (stop() los destruye).
-                val uri = mediaItem?.localConfiguration?.uri?.toString() ?: ""
-                val isPlaceholder = uri.startsWith("https://youtube.com/watch?v=") ||
-                        uri.startsWith("http://youtube.com/watch?v=")
-                val isExpired = isStreamUrlExpired(uri)
-                if ((isPlaceholder || isExpired) && song.localFilePath.isNullOrBlank()) {
-                    player.pause()
-                    _isLoading.value = true
-                }
                 onSongTransitionTriggered?.invoke(song)
             }
             checkInfiniteRadioTrigger(isEnd = false)
@@ -301,14 +321,21 @@ class AudioPlayerManager(
         }
     }
 
+    var onSeekNextRequested: (() -> Unit)? = null
+    var onSeekPreviousRequested: (() -> Unit)? = null
+
     fun seekToNext() {
-        if (player.hasNextMediaItem()) {
+        if (onSeekNextRequested != null) {
+            onSeekNextRequested?.invoke()
+        } else if (player.hasNextMediaItem()) {
             player.seekToNextMediaItem()
         }
     }
 
     fun seekToPrevious() {
-        if (player.hasPreviousMediaItem()) {
+        if (onSeekPreviousRequested != null) {
+            onSeekPreviousRequested?.invoke()
+        } else if (player.hasPreviousMediaItem()) {
             player.seekToPreviousMediaItem()
         } else {
             player.seekTo(0L)
@@ -382,13 +409,10 @@ class AudioPlayerManager(
         val song = currentQueue[index]
         val updatedMediaItem = songToMediaItem(song, streamUrl)
         val isCurrent = player.currentMediaItemIndex == index
-
-        val isCurrentPlaceholder = existingUri.startsWith("https://youtube.com/watch?v=") ||
-                existingUri.startsWith("http://youtube.com/watch?v=")
-        val isCurrentExpired = isStreamUrlExpired(existingUri)
+        val isCurrentPlaceholder = isPlaceholderUrl(existingUri)
 
         if (isCurrent) {
-            val shouldStartPlayback = isCurrentPlaceholder || isCurrentExpired || player.playerError != null || !player.isPlaying
+            val shouldStartPlayback = isCurrentPlaceholder || player.playerError != null || !player.isPlaying
             player.replaceMediaItem(index, updatedMediaItem)
             if (shouldStartPlayback) {
                 player.seekTo(index, 0L)
@@ -432,22 +456,19 @@ class AudioPlayerManager(
     }
 
     companion object {
-        fun isStreamUrlExpired(url: String?): Boolean {
+        @Volatile
+        var globalStreamResolver: ((songId: String) -> String?)? = null
+
+        fun isPlaceholderUrl(url: String?): Boolean {
             if (url.isNullOrBlank()) return true
-            if (!url.startsWith("http://") && !url.startsWith("https://")) return false
-            try {
-                val uri = Uri.parse(url)
-                val expireStr = uri.getQueryParameter("expire")
-                if (!expireStr.isNullOrBlank()) {
-                    val expireSec = expireStr.toLongOrNull() ?: 0L
-                    val currentSec = System.currentTimeMillis() / 1000L
-                    // Si faltan menos de 5 minutos (300 segundos) para que expire o ya expiró
-                    if (currentSec >= (expireSec - 300L)) {
-                        return true
-                    }
-                }
-            } catch (_: Exception) {}
-            return false
+            return url.startsWith("https://youtube.com/watch?v=") ||
+                    url.startsWith("http://youtube.com/watch?v=")
+        }
+
+        fun isStreamUrlExpired(url: String?): Boolean {
+            // Ya no usamos el parámetro 'expire' contra System.currentTimeMillis() porque
+            // causa fallos cuando la fecha del dispositivo está desincronizada (ej. 2026).
+            return isPlaceholderUrl(url)
         }
     }
 }

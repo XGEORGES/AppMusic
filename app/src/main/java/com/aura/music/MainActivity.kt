@@ -12,6 +12,7 @@ import androidx.core.content.ContextCompat
 import com.aura.music.ui.RootScreen
 import com.aura.music.ui.explore.ExploreViewModel
 import com.aura.music.ui.library.LibraryViewModel
+import com.aura.music.ui.license.LicenseViewModel
 import com.aura.music.ui.player.PlayerViewModel
 import com.aura.music.ui.search.SearchViewModel
 import com.aura.music.ui.theme.GeorgeMusicTheme
@@ -24,6 +25,7 @@ class MainActivity : ComponentActivity() {
     private val exploreViewModel: ExploreViewModel by viewModels()
     private val searchViewModel: SearchViewModel by viewModels()
     private val libraryViewModel: LibraryViewModel by viewModels()
+    private val licenseViewModel: LicenseViewModel by viewModels()
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -50,7 +52,8 @@ class MainActivity : ComponentActivity() {
                     playerViewModel = playerViewModel,
                     exploreViewModel = exploreViewModel,
                     searchViewModel = searchViewModel,
-                    libraryViewModel = libraryViewModel
+                    libraryViewModel = libraryViewModel,
+                    licenseViewModel = licenseViewModel
                 )
             }
         }

@@ -48,6 +48,26 @@ open class PlayerRepository @Inject constructor(
         .stateIn(scope, SharingStarted.Eagerly, emptyList())
 
     init {
+        // Conectar ResolvingDataSource de AudioPlayerManager con extracción bajo demanda y caché
+        audioPlayerManager.streamResolver = { songId ->
+            getValidCachedStream(songId) ?: run {
+                try {
+                    val streamInfo = kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+                        youTubeMusicSource.getStreamUrl(songId)
+                    }
+                    putStreamUrlCache(songId, streamInfo.url)
+                    streamInfo.url
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    null
+                }
+            }
+        }
+
+        // Conectar botones de búsqueda de la notificación o dispositivos externos
+        audioPlayerManager.onSeekNextRequested = { seekToNext() }
+        audioPlayerManager.onSeekPreviousRequested = { seekToPrevious() }
+
         // Sincronizar canción actual desde AudioPlayerManager
         scope.launch {
             audioPlayerManager.currentSong.collect { songItem ->
@@ -67,39 +87,22 @@ open class PlayerRepository @Inject constructor(
                     songDao.updatePlayCount(songItem.id)
                 } catch (_: Exception) {}
 
-                // Si la canción no es local, siempre asegurar que ExoPlayer tenga el stream real y vigente
-                if (songItem.localFilePath.isNullOrBlank()) {
-                    val cachedUrl = getValidCachedStream(songItem.id)
-                    if (!cachedUrl.isNullOrBlank()) {
-                        audioPlayerManager.updateMediaItemStream(songItem.id, cachedUrl)
-                    } else {
-                        // Resolver el stream en background mostrando el estado de carga
-                        audioPlayerManager.prepareForLoading(songItem)
-                        scope.launch(Dispatchers.IO) {
-                            try {
-                                val streamInfo = youTubeMusicSource.getStreamUrl(songItem.id)
-                                putStreamUrlCache(songItem.id, streamInfo.url)
-                                kotlinx.coroutines.withContext(Dispatchers.Main) {
-                                    audioPlayerManager.updateMediaItemStream(songItem.id, streamInfo.url)
-                                }
-                            } catch (e: Exception) {
-                                e.printStackTrace()
-                                kotlinx.coroutines.withContext(Dispatchers.Main) {
-                                    audioPlayerManager.cancelLoading()
-                                    // Si la carga falla en transición automática, avanzar a la siguiente pista
-                                    seekToNext()
-                                }
-                            }
-                        }
-                    }
-                }
-
                 // Disparar precarga de la siguiente canción de la cola activa (1 pista adelante)
                 val currentQueue = queue.value
                 val currentIndex = currentQueue.indexOfFirst { it.id == songItem.id }
                 if (currentIndex != -1) {
                     preloadStreams(currentQueue, priorityIndex = currentIndex + 1)
                 }
+            }
+        }
+
+        // Configurar fin de canción (si no había siguiente pista en ExoPlayer)
+        audioPlayerManager.onSongEndedTriggered = {
+            if (audioPlayerManager.repeatMode.value == Player.REPEAT_MODE_ONE) {
+                audioPlayerManager.seekTo(0L)
+                audioPlayerManager.play()
+            } else {
+                seekToNext()
             }
         }
 
@@ -114,13 +117,12 @@ open class PlayerRepository @Inject constructor(
                     errorRetryCount = 1
                 }
 
-                if (errorRetryCount <= 2 && songItem.localFilePath.isNullOrBlank()) {
+                if (errorRetryCount <= 1 && songItem.localFilePath.isNullOrBlank()) {
                     playSong(songItem.toEntity())
                 } else {
                     errorRetryCount = 0
                     lastErrorSongId = null
                     audioPlayerManager.cancelLoading()
-                    // Si la canción falló 2 veces (borrada, bloqueada o caída), saltar automáticamente
                     seekToNext()
                 }
             }
@@ -174,26 +176,21 @@ open class PlayerRepository @Inject constructor(
 
     data class CachedStream(
         val url: String,
-        val fetchedAtMs: Long = System.currentTimeMillis()
+        val fetchedAtElapsedMs: Long = try {
+            android.os.SystemClock.elapsedRealtime()
+        } catch (_: Throwable) {
+            System.currentTimeMillis()
+        }
     ) {
         fun isExpired(): Boolean {
-            // Expiración por tiempo: máximo 3 horas (para evitar fallos por cambio de IP o expiración del token)
-            if (System.currentTimeMillis() - fetchedAtMs > 3 * 60 * 60 * 1000L) {
-                return true
+            val now = try {
+                android.os.SystemClock.elapsedRealtime()
+            } catch (_: Throwable) {
+                System.currentTimeMillis()
             }
-            // Expiración por parámetro 'expire' de YouTube
-            try {
-                val uri = android.net.Uri.parse(url)
-                val expireStr = uri.getQueryParameter("expire")
-                if (!expireStr.isNullOrBlank()) {
-                    val expireSec = expireStr.toLongOrNull() ?: 0L
-                    val currentSec = System.currentTimeMillis() / 1000L
-                    if (currentSec >= (expireSec - 300L)) {
-                        return true
-                    }
-                }
-            } catch (_: Exception) {}
-            return false
+            // Una URL de YouTube es válida por al menos 4 a 6 horas.
+            // Consideramos seguro reutilizarla hasta por 3.5 horas de tiempo activo del dispositivo.
+            return (now - fetchedAtElapsedMs) > (3.5 * 60 * 60 * 1000L).toLong()
         }
     }
 
@@ -287,7 +284,27 @@ open class PlayerRepository @Inject constructor(
             return
         }
 
-        // Cache-miss: Silenciar inmediatamente la canción previa y activar estado de carga en la UI
+        // Si la canción ya forma parte de la cola cargada en ExoPlayer, seek directo a su índice
+        val q = audioPlayerManager.queue.value
+        val queueIndex = q.indexOfFirst { it.id == song.id }
+        if (queueIndex >= 0 && queueIndex < audioPlayerManager.player.mediaItemCount) {
+            audioPlayerManager.prepareForLoading(item)
+            if (audioPlayerManager.player.currentMediaItemIndex != queueIndex) {
+                audioPlayerManager.player.seekToDefaultPosition(queueIndex)
+            } else {
+                audioPlayerManager.player.seekTo(queueIndex, 0L)
+            }
+            audioPlayerManager.player.prepare()
+            audioPlayerManager.ensureServiceStarted()
+            audioPlayerManager.player.play()
+            scope.launch {
+                try { songDao.updatePlayCount(song.id) } catch (_: Exception) {}
+                preloadStreams(queue.value, priorityIndex = queueIndex + 1)
+            }
+            return
+        }
+
+        // Cache-miss y no en cola previa: Silenciar inmediatamente la canción previa y activar estado de carga en la UI
         audioPlayerManager.prepareForLoading(item)
 
         playJob = scope.launch {
@@ -319,18 +336,13 @@ open class PlayerRepository @Inject constructor(
 
     open fun setQueue(songs: List<SongEntity>, startIndex: Int = 0) {
         if (songs.isEmpty()) return
-        val items = songs.map { song ->
-            val cached = getValidCachedStream(song.id)
-            if (!cached.isNullOrBlank() && song.localFilePath.isNullOrBlank()) {
-                SongItem.fromEntity(song)
-            } else {
-                SongItem.fromEntity(song)
-            }
-        }
-        audioPlayerManager.setQueue(items, startIndex, autoPlay = false)
+        val items = songs.map { SongItem.fromEntity(it) }
+        audioPlayerManager.setQueue(items, startIndex, autoPlay = true)
         val initialSong = songs.getOrNull(startIndex) ?: songs.first()
-        playSong(initialSong)
-        // Precargar en segundo plano la siguiente de la cola
+        _currentPlayingSong.value = initialSong
+        scope.launch {
+            try { songDao.updatePlayCount(initialSong.id) } catch (_: Exception) {}
+        }
         preloadStreams(songs, priorityIndex = startIndex + 1)
     }
 
@@ -377,14 +389,10 @@ open class PlayerRepository @Inject constructor(
         val player = audioPlayerManager.player
         val currentMediaItem = player.currentMediaItem
         val currentUri = currentMediaItem?.localConfiguration?.uri?.toString() ?: ""
-        val isPlaceholder = currentUri.startsWith("https://youtube.com/watch?v=") ||
-                currentUri.startsWith("http://youtube.com/watch?v=") ||
-                currentUri.isBlank()
-        val isExpired = AudioPlayerManager.isStreamUrlExpired(currentUri)
+        val isPlaceholder = AudioPlayerManager.isPlaceholderUrl(currentUri)
 
         val isReadyToResume = player.playbackState == Player.STATE_READY &&
                 !isPlaceholder &&
-                !isExpired &&
                 player.playerError == null &&
                 (currentMediaItem?.mediaId == currentSong.id)
 
@@ -392,8 +400,6 @@ open class PlayerRepository @Inject constructor(
             audioPlayerManager.ensureServiceStarted()
             player.play()
         } else {
-            streamUrlCache.remove(currentSong.id)
-
             val currentPos = audioPlayerManager.currentPosition.value
             val totalDuration = audioPlayerManager.duration.value
             val shouldRestorePosition = currentPos > 1000L && (totalDuration <= 0L || currentPos < totalDuration - 2000L)

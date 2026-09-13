@@ -1,6 +1,7 @@
 package com.aura.music.ui.explore
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -43,6 +44,9 @@ import androidx.compose.material.icons.filled.Radio
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material.icons.filled.ThumbUpOffAlt
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.WorkspacePremium
+import com.aura.music.core.license.LicenseStatus
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -101,6 +105,8 @@ fun ExploreScreen(
     onPlayNext: (SongEntity) -> Unit = {},
     onAddToQueue: (SongEntity) -> Unit = {},
     onStartMix: (SongEntity) -> Unit = {},
+    licenseStatus: LicenseStatus = LicenseStatus.Unlicensed,
+    onOpenLicenseManagement: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -132,7 +138,7 @@ fun ExploreScreen(
             .padding(horizontal = 16.dp),
         contentPadding = PaddingValues(bottom = 120.dp)
     ) {
-        // 1. Cabecera principal: Logo George Music (Play rojo) + Campana de notificaciones
+        // 1. Cabecera principal: Logo George Music + Botón VIP/Licencia
         item {
             Row(
                 modifier = Modifier
@@ -164,6 +170,77 @@ fun ExploreScreen(
                         fontSize = 22.sp,
                         fontWeight = FontWeight.Bold
                     )
+                }
+
+                // Botón Insignia de Licencia / VIP
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(DarkCard)
+                        .border(1.dp, DarkSurfaceVariant, RoundedCornerShape(20.dp))
+                        .clickable { onOpenLicenseManagement() }
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.WorkspacePremium,
+                        contentDescription = "Licencia",
+                        tint = when (licenseStatus) {
+                            is LicenseStatus.Active -> if (licenseStatus.isLifetime) Color(0xFFFFD700) else Color(0xFF4ADE80)
+                            is LicenseStatus.ExpiringSoon -> Color(0xFFFBBF24)
+                            else -> Color(0xFFFF5555)
+                        },
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = when (licenseStatus) {
+                            is LicenseStatus.Active -> if (licenseStatus.isLifetime) "VIP" else "${licenseStatus.daysRemaining}d"
+                            is LicenseStatus.ExpiringSoon -> "${licenseStatus.daysRemaining}d"
+                            else -> "Licencia"
+                        },
+                        color = TextPrimary,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
+        }
+
+        // Banner preventivo si la licencia vence en 3 días o menos
+        if (licenseStatus is LicenseStatus.ExpiringSoon) {
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xFF2A1C04))
+                        .border(1.dp, Color(0xFFD97706), RoundedCornerShape(10.dp))
+                        .clickable { onOpenLicenseManagement() }
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = "Alerta",
+                        tint = Color(0xFFFBBF24),
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Tu suscripción vence pronto (${licenseStatus.daysRemaining} días)",
+                            color = Color(0xFFFEF3C7),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Toca aquí para pre-cargar tu código y no perder el servicio.",
+                            color = Color(0xFFFDE68A),
+                            fontSize = 11.sp
+                        )
+                    }
                 }
             }
         }
@@ -476,8 +553,9 @@ fun ExploreScreen(
         if (similarTitle != null && similarPlaylists.isNotEmpty()) {
             item {
                 Column(modifier = Modifier.fillMaxWidth()) {
+                    val isTrend = similarTitle.equals("Tendencias de Hoy", ignoreCase = true)
                     Text(
-                        text = "SIMILARES A",
+                        text = if (isTrend) "DESCUBRIR" else "SIMILARES A",
                         color = TextMuted,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.SemiBold

@@ -1,4 +1,4 @@
-﻿# Built application files and binaries
+# Built application files and binaries
 *.apk
 *.aar
 *.ap_
@@ -53,6 +53,7 @@ google-services.json
 secrets.properties
 *.env
 *.env.*
+tools/
 
 # Log files
 *.log

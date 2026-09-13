@@ -31,10 +31,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.aura.music.core.license.LicenseStatus
 import com.aura.music.ui.explore.ExploreScreen
 import com.aura.music.ui.explore.ExploreViewModel
 import com.aura.music.ui.library.LibraryScreen
 import com.aura.music.ui.library.LibraryViewModel
+import com.aura.music.ui.license.LicenseGatekeeperScreen
+import com.aura.music.ui.license.LicenseManagementSheet
+import com.aura.music.ui.license.LicenseViewModel
 import com.aura.music.ui.navigation.NavigationDestination
 import com.aura.music.ui.player.ExpandedPlayerView
 import com.aura.music.ui.player.MiniPlayerBar
@@ -45,6 +49,7 @@ import com.aura.music.ui.theme.DarkSurface
 import com.aura.music.ui.theme.OledBlack
 import com.aura.music.ui.theme.TextMuted
 import com.aura.music.ui.theme.TextPrimary
+import androidx.compose.runtime.LaunchedEffect
 
 @Composable
 fun RootScreen(
@@ -52,12 +57,35 @@ fun RootScreen(
     exploreViewModel: ExploreViewModel,
     searchViewModel: SearchViewModel,
     libraryViewModel: LibraryViewModel,
+    licenseViewModel: LicenseViewModel,
     modifier: Modifier = Modifier
 ) {
-    var currentDestination by remember { mutableStateOf(NavigationDestination.HOME) }
+    val licenseStatus by licenseViewModel.licenseStatus.collectAsState()
+    var showLicenseSheet by remember { mutableStateOf(false) }
 
     val currentSong by playerViewModel.currentPlayingSong.collectAsState()
     val isPlaying by playerViewModel.isPlaying.collectAsState()
+
+    // Pausar si la licencia caduca o se bloquea mientras se reproduce
+    LaunchedEffect(licenseStatus) {
+        val isLicensed = licenseStatus is LicenseStatus.Active || licenseStatus is LicenseStatus.ExpiringSoon
+        if (!isLicensed && isPlaying) {
+            playerViewModel.togglePlayPause()
+        }
+    }
+
+    val isLicensed = licenseStatus is LicenseStatus.Active || licenseStatus is LicenseStatus.ExpiringSoon
+
+    // Si no tiene licencia válida, desplegar el Gatekeeper bloqueando la app
+    if (!isLicensed) {
+        LicenseGatekeeperScreen(
+            viewModel = licenseViewModel,
+            modifier = modifier
+        )
+        return
+    }
+
+    var currentDestination by remember { mutableStateOf(NavigationDestination.HOME) }
     val isLoading by playerViewModel.isLoading.collectAsState()
     val playbackPosition by playerViewModel.playbackPosition.collectAsState()
     val duration by playerViewModel.duration.collectAsState()
@@ -145,7 +173,9 @@ fun RootScreen(
                         onSongClick = { song -> playerViewModel.playSong(song) },
                         onPlayNext = { song -> playerViewModel.playNext(song) },
                         onAddToQueue = { song -> playerViewModel.addToQueue(song) },
-                        onStartMix = { song -> playerViewModel.startMix(song) }
+                        onStartMix = { song -> playerViewModel.startMix(song) },
+                        licenseStatus = licenseStatus,
+                        onOpenLicenseManagement = { showLicenseSheet = true }
                     )
                 }
                 NavigationDestination.SEARCH -> {
@@ -211,5 +241,13 @@ fun RootScreen(
                 onToggleInfiniteRadio = { playerViewModel.setInfiniteRadioEnabled(it) }
             )
         }
+    }
+
+    // Modal de gestión y pre-carga de licencias
+    if (showLicenseSheet) {
+        LicenseManagementSheet(
+            viewModel = licenseViewModel,
+            onDismiss = { showLicenseSheet = false }
+        )
     }
 }

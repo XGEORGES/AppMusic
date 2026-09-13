@@ -178,4 +178,48 @@ class AudioServiceLogicTest {
         audioPlayerManager.checkInfiniteRadioTrigger(isEnd = false)
         assertEquals("song_3", triggeredLastSongId)
     }
+
+    /**
+     * Test 3.7: Verificar la detección de URLs placeholder y que streamResolver
+     * sea accesible para la resolución bajo demanda de streams.
+     */
+    @Test
+    fun test3_7_placeholderUrlDetectionAndResolvingDelegate() {
+        val placeholderUrl = "https://youtube.com/watch?v=abc123xyz"
+        val realStreamUrl = "https://rr3---sn-4g5ednss.googlevideo.com/videoplayback?expire=1741890000"
+
+        org.junit.Assert.assertTrue(AudioPlayerManager.isPlaceholderUrl(placeholderUrl))
+        org.junit.Assert.assertFalse(AudioPlayerManager.isPlaceholderUrl(realStreamUrl))
+        org.junit.Assert.assertTrue(AudioPlayerManager.isPlaceholderUrl(null))
+
+        var resolvedSongId: String? = null
+        audioPlayerManager.streamResolver = { songId ->
+            resolvedSongId = songId
+            "https://mock.stream.url/$songId"
+        }
+
+        assertNotNull(audioPlayerManager.streamResolver)
+        val result = audioPlayerManager.streamResolver?.invoke("track_99")
+        assertEquals("track_99", resolvedSongId)
+        assertEquals("https://mock.stream.url/track_99", result)
+    }
+
+    /**
+     * Test 3.8: Verificar que los callbacks onSeekNextRequested y onSeekPreviousRequested
+     * redirijan las solicitudes de salto a través de AudioPlayerManager.
+     */
+    @Test
+    fun test3_8_onSeekRequestedCallbacks() {
+        var seekNextCalled = false
+        var seekPrevCalled = false
+
+        audioPlayerManager.onSeekNextRequested = { seekNextCalled = true }
+        audioPlayerManager.onSeekPreviousRequested = { seekPrevCalled = true }
+
+        audioPlayerManager.seekToNext()
+        org.junit.Assert.assertTrue("seekToNext() debe invocar onSeekNextRequested si está configurado", seekNextCalled)
+
+        audioPlayerManager.seekToPrevious()
+        org.junit.Assert.assertTrue("seekToPrevious() debe invocar onSeekPreviousRequested si está configurado", seekPrevCalled)
+    }
 }
