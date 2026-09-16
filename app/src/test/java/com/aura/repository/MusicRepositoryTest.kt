@@ -143,4 +143,29 @@ class MusicRepositoryTest {
             playerRepository.currentPlayingSong.value?.isFavorite ?: true
         )
     }
+
+    /**
+     * Test 4.3: Verificar que play() y pause() actúen de manera determinista
+     * y que pause() detenga la reproducción sin invertir el estado arbitrariamente.
+     */
+    @Test
+    fun test4_3_explicitPlayAndPauseMethodsAreDeterministic() = runBlocking {
+        val testSong = SongEntity(
+            id = "playback_test_song",
+            title = "Playback Song",
+            artistName = "Artist",
+            thumbnailUrl = "thumb"
+        )
+        songDao.insertOrUpdate(testSong)
+
+        playerRepository.playSong(testSong)
+
+        // pause() debe pausar
+        playerRepository.pause()
+        assertFalse("El reproductor debe estar en pausa después de llamar a pause()", playerManager.player.playWhenReady)
+
+        // Llamar pause() nuevamente no debe invertir a play
+        playerRepository.pause()
+        assertFalse("Llamar pause() dos veces debe mantener el reproductor en pausa", playerManager.player.playWhenReady)
+    }
 }

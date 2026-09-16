@@ -1,4 +1,4 @@
-﻿# George Music (AppMusic)
+# Aura Music (AppMusic)
 
 Aplicación de reproducción y gestión de música para Android desarrollada con Kotlin y Jetpack Compose.
 

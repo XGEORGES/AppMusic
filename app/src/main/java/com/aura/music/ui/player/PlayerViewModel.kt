@@ -34,6 +34,14 @@ open class PlayerViewModel @Inject constructor(
         _isExpanded.value = expanded
     }
 
+    fun play() {
+        playerRepository.play()
+    }
+
+    fun pause() {
+        playerRepository.pause()
+    }
+
     fun togglePlayPause() {
         playerRepository.togglePlayPause()
     }

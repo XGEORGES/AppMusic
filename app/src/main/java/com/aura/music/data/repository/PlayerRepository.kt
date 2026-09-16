@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import androidx.media3.common.Player
@@ -195,6 +196,7 @@ open class PlayerRepository @Inject constructor(
     }
 
     private var playJob: kotlinx.coroutines.Job? = null
+    private var positionRestoreJob: kotlinx.coroutines.Job? = null
     private var prefetchJob: kotlinx.coroutines.Job? = null
     private val streamUrlCache = java.util.concurrent.ConcurrentHashMap<String, CachedStream>()
 
@@ -236,26 +238,33 @@ open class PlayerRepository @Inject constructor(
     }
 
     open fun playSong(song: SongEntity) {
-        _currentPlayingSong.value = song
+        positionRestoreJob?.cancel()
         playJob?.cancel()
 
-        if (song.id.startsWith("PL") || song.id.startsWith("PL_")) {
-            val playlistId = if (song.id.startsWith("PL_")) song.id.removePrefix("PL_") else song.id
+        if (song.id.startsWith("PL") || song.id.startsWith("PL_") || song.id.startsWith("OLAK5uy_") || song.id.startsWith("VL")) {
+            val rawId = if (song.id.startsWith("PL_")) song.id.removePrefix("PL_") else song.id
+            val playlistId = if (rawId.startsWith("VL")) rawId.removePrefix("VL") else rawId
             playJob = scope.launch {
                 try {
+                    audioPlayerManager.prepareForLoading(SongItem.fromEntity(song), resetPosition = true)
                     val extracted = kotlinx.coroutines.withContext(Dispatchers.IO) {
                         youTubeMusicSource.extractPlaylist(playlistId)
                     }
                     if (extracted.songs.isNotEmpty()) {
                         val songEntities = extracted.songs.map { it.toEntity() }
                         setQueue(songEntities, startIndex = 0)
+                    } else {
+                        audioPlayerManager.cancelLoading()
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
+                    audioPlayerManager.cancelLoading()
                 }
             }
             return
         }
+
+        _currentPlayingSong.value = song
 
         val item = SongItem.fromEntity(song)
 
@@ -310,6 +319,21 @@ open class PlayerRepository @Inject constructor(
         playJob = scope.launch {
             try {
                 songDao.updatePlayCount(song.id)
+            } catch (_: Exception) {}
+
+            // Si la canción ya fue descargada localmente, reproducir directo del archivo sin usar red
+            try {
+                val localSong = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    songDao.getSongById(song.id)
+                }
+                if (localSong != null && !localSong.localFilePath.isNullOrBlank()) {
+                    val file = java.io.File(localSong.localFilePath)
+                    if (file.exists()) {
+                        _currentPlayingSong.value = localSong
+                        audioPlayerManager.playStream(SongItem.fromEntity(localSong), localSong.localFilePath)
+                        return@launch
+                    }
+                }
             } catch (_: Exception) {}
 
             try {
@@ -371,13 +395,8 @@ open class PlayerRepository @Inject constructor(
         }
     }
 
-    open fun togglePlayPause() {
-        if (audioPlayerManager.isLoading.value) {
-            return
-        }
-
+    open fun play() {
         if (audioPlayerManager.isPlaying.value) {
-            audioPlayerManager.pause()
             return
         }
 
@@ -388,11 +407,8 @@ open class PlayerRepository @Inject constructor(
 
         val player = audioPlayerManager.player
         val currentMediaItem = player.currentMediaItem
-        val currentUri = currentMediaItem?.localConfiguration?.uri?.toString() ?: ""
-        val isPlaceholder = AudioPlayerManager.isPlaceholderUrl(currentUri)
 
         val isReadyToResume = player.playbackState == Player.STATE_READY &&
-                !isPlaceholder &&
                 player.playerError == null &&
                 (currentMediaItem?.mediaId == currentSong.id)
 
@@ -407,15 +423,29 @@ open class PlayerRepository @Inject constructor(
             playSong(currentSong)
 
             if (shouldRestorePosition) {
-                scope.launch {
-                    audioPlayerManager.isPlaying.collect { playing ->
-                        if (playing) {
-                            audioPlayerManager.seekTo(currentPos)
-                            return@collect
-                        }
-                    }
+                positionRestoreJob?.cancel()
+                positionRestoreJob = scope.launch {
+                    audioPlayerManager.isPlaying.first { it }
+                    audioPlayerManager.seekTo(currentPos)
                 }
             }
+        }
+    }
+
+    open fun pause() {
+        positionRestoreJob?.cancel()
+        audioPlayerManager.pause()
+    }
+
+    open fun togglePlayPause() {
+        if (audioPlayerManager.isLoading.value) {
+            return
+        }
+
+        if (audioPlayerManager.isPlaying.value) {
+            pause()
+        } else {
+            play()
         }
     }
 
@@ -429,13 +459,41 @@ open class PlayerRepository @Inject constructor(
         val nextIndex = if (current != null) q.indexOfFirst { it.id == current.id } + 1 else 0
         if (nextIndex in q.indices) {
             playSong(q[nextIndex])
-        } else {
-            // Fin de la cola: volver al inicio de la playlist (loop continuo)
-            if (q.isNotEmpty()) {
-                playSong(q.first())
-            } else {
-                audioPlayerManager.seekToNext()
+        } else if (audioPlayerManager.repeatMode.value == androidx.media3.common.Player.REPEAT_MODE_ALL && q.isNotEmpty()) {
+            // Repetir toda la lista desde el principio únicamente con REPEAT_MODE_ALL
+            playSong(q.first())
+        } else if (audioPlayerManager.isInfiniteRadioEnabled.value && current != null) {
+            // Fin de la cola con Radio Infinita: traer canciones recomendadas y continuar sin repetir
+            audioPlayerManager.prepareForLoading(SongItem.fromEntity(current), resetPosition = false)
+            scope.launch(Dispatchers.IO) {
+                try {
+                    val related = youTubeMusicSource.getSongRadio(current.id)
+                    val currentIds = audioPlayerManager.queue.value.map { it.id }.toSet()
+                    val newSongs = related.filter { it.id !in currentIds }
+                    if (newSongs.isNotEmpty()) {
+                        kotlinx.coroutines.withContext(Dispatchers.Main) {
+                            audioPlayerManager.addToQueue(newSongs)
+                            val firstNewSong = newSongs.first().toEntity()
+                            playSong(firstNewSong)
+                        }
+                    } else {
+                        kotlinx.coroutines.withContext(Dispatchers.Main) {
+                            audioPlayerManager.cancelLoading()
+                            audioPlayerManager.pause()
+                        }
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    kotlinx.coroutines.withContext(Dispatchers.Main) {
+                        audioPlayerManager.cancelLoading()
+                        audioPlayerManager.pause()
+                    }
+                }
             }
+        } else {
+            // Fin de cola sin bucles
+            audioPlayerManager.pause()
+            audioPlayerManager.seekTo(0L)
         }
     }
 
@@ -452,13 +510,11 @@ open class PlayerRepository @Inject constructor(
         val prevIndex = if (current != null) q.indexOfFirst { it.id == current.id } - 1 else 0
         if (prevIndex in q.indices) {
             playSong(q[prevIndex])
+        } else if (audioPlayerManager.repeatMode.value == androidx.media3.common.Player.REPEAT_MODE_ALL && q.isNotEmpty()) {
+            // Si está en la primera canción y repite todo, envolver al final de la playlist
+            playSong(q.last())
         } else {
-            // Si está en la primera canción, envolver al final de la playlist
-            if (q.isNotEmpty()) {
-                playSong(q.last())
-            } else {
-                audioPlayerManager.seekToPrevious()
-            }
+            audioPlayerManager.seekTo(0L)
         }
     }
 

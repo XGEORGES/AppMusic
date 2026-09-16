@@ -222,7 +222,7 @@ fun ExpandedPlayerView(
 
             // Barra de progreso (Seekbar) interactiva
             val progress = if (duration > 0) currentPosition.toFloat() / duration.toFloat() else 0f
-            var sliderPosition by remember(currentPosition) { mutableStateOf(progress) }
+            var sliderPosition by remember(currentPosition, duration) { mutableStateOf(progress) }
 
             Slider(
                 value = sliderPosition.coerceIn(0f, 1f),
@@ -364,8 +364,16 @@ fun ExpandedPlayerView(
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold
                 )
+                val currentIndex = queue.indexOfFirst { it.id == song?.id }
+                val nextSong = if (currentIndex != -1 && currentIndex + 1 < queue.size) queue[currentIndex + 1] else null
+                val upNextLabel = when {
+                    nextSong != null -> "A continuación • ${nextSong.title}"
+                    isInfiniteRadioEnabled -> "A continuación • Radio infinita"
+                    repeatMode == Player.REPEAT_MODE_ALL && queue.isNotEmpty() -> "A continuación • ${queue.first().title}"
+                    else -> "A continuación • Fin de la lista"
+                }
                 Text(
-                    text = "A continuación • ${song.title}",
+                    text = upNextLabel,
                     color = TextPrimary,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Medium,
@@ -558,9 +566,14 @@ fun ExpandedPlayerView(
 }
 
 private fun formatTime(millis: Long): String {
-    val totalSeconds = millis / 1000
-    val minutes = totalSeconds / 60
+    val totalSeconds = (millis / 1000).coerceAtLeast(0L)
+    val hours = totalSeconds / 3600
+    val minutes = (totalSeconds % 3600) / 60
     val seconds = totalSeconds % 60
-    return String.format(Locale.getDefault(), "%02d:%02d", minutes, seconds)
+    return if (hours > 0) {
+        String.format(Locale.getDefault(), "%d:%02d:%02d", hours, minutes, seconds)
+    } else {
+        String.format(Locale.getDefault(), "%02d:%02d", minutes, seconds)
+    }
 }
 

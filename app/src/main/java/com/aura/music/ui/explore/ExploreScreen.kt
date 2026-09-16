@@ -1,8 +1,11 @@
 package com.aura.music.ui.explore
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.res.painterResource
+import com.aura.music.R
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -102,6 +105,10 @@ import android.widget.Toast
 fun ExploreScreen(
     viewModel: ExploreViewModel,
     onSongClick: (SongEntity) -> Unit,
+    onPlaySongList: (List<SongEntity>) -> Unit = { songs -> if (songs.isNotEmpty()) onSongClick(songs.first()) },
+    onPlaySongAtIndex: (List<SongEntity>, Int) -> Unit = { songs, index ->
+        if (index in songs.indices) onSongClick(songs[index])
+    },
     onPlayNext: (SongEntity) -> Unit = {},
     onAddToQueue: (SongEntity) -> Unit = {},
     onStartMix: (SongEntity) -> Unit = {},
@@ -111,7 +118,9 @@ fun ExploreScreen(
 ) {
     val context = LocalContext.current
     val selectedChip by viewModel.selectedChip.collectAsState()
+    val isChipLoading by viewModel.isChipLoading.collectAsState()
     val chipPlaylists by viewModel.chipPlaylists.collectAsState()
+    val chipSongs by viewModel.chipSongs.collectAsState()
     val similarTitle by viewModel.similarTitle.collectAsState()
     val shortcutItems by viewModel.shortcutItems.collectAsState()
     val quickPicks by viewModel.quickPicks.collectAsState()
@@ -148,24 +157,17 @@ fun ExploreScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    // Logo circular rojo estilo YouTube Music
-                    Box(
+                    // Logo oficial de Aura Music
+                    Image(
+                        painter = painterResource(id = R.mipmap.ic_launcher_round),
+                        contentDescription = "Logo Aura Music",
                         modifier = Modifier
-                            .size(32.dp)
+                            .size(34.dp)
                             .clip(CircleShape)
-                            .background(Color(0xFFFF0000)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.PlayArrow,
-                            contentDescription = "Logo",
-                            tint = Color.White,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
                     Text(
-                        text = "George Music",
+                        text = "Aura Music",
                         color = TextPrimary,
                         fontSize = 22.sp,
                         fontWeight = FontWeight.Bold
@@ -257,6 +259,16 @@ fun ExploreScreen(
                         selected = isSelected,
                         onClick = { viewModel.selectChip(chip) },
                         label = { Text(chip, fontSize = 13.sp) },
+                        trailingIcon = if (isSelected) {
+                            {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Desmarcar $chip",
+                                    modifier = Modifier.size(14.dp),
+                                    tint = Color.Black
+                                )
+                            }
+                        } else null,
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = Color.White,
                             selectedLabelColor = Color.Black,
@@ -270,51 +282,230 @@ fun ExploreScreen(
             Spacer(modifier = Modifier.height(16.dp))
         }
 
-        // Si hay un chip seleccionado, mostrar las playlists correspondientes a ese tema
-        if (selectedChip != null && chipPlaylists.isNotEmpty()) {
-            item {
-                Column(modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
-                    Text(
-                        text = "Playlists de $selectedChip",
-                        color = TextPrimary,
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(bottom = 12.dp)
-                    )
-                    LazyRow(
-                        horizontalArrangement = Arrangement.spacedBy(14.dp),
-                        modifier = Modifier.fillMaxWidth()
+        // -------------------------------------------------------------
+        // FEED ESPECÍFICO DE CHIP SELECCIONADO (Energía, Rock, Pop, etc.)
+        // -------------------------------------------------------------
+        if (selectedChip != null) {
+            if (isChipLoading) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 48.dp),
+                        contentAlignment = Alignment.Center
                     ) {
-                        items(chipPlaylists) { playlist ->
-                            Column(
-                                modifier = Modifier
-                                    .width(140.dp)
-                                    .clickable { onSongClick(playlist) }
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator(
+                                color = Color.White,
+                                modifier = Modifier.size(36.dp),
+                                strokeWidth = 3.dp
+                            )
+                            Spacer(modifier = Modifier.height(14.dp))
+                            Text(
+                                text = "Cargando música de $selectedChip...",
+                                color = TextSecondary,
+                                fontSize = 14.sp
+                            )
+                        }
+                    }
+                }
+            } else {
+                // 1. Playlists del tema seleccionado
+                if (chipPlaylists.isNotEmpty()) {
+                    item {
+                        Column(modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+                            Text(
+                                text = "Playlists de $selectedChip",
+                                color = TextPrimary,
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(bottom = 14.dp)
+                            )
+                            LazyRow(
+                                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                                modifier = Modifier.fillMaxWidth()
                             ) {
-                                AsyncImage(
-                                    model = playlist.thumbnailUrl,
-                                    contentDescription = playlist.title,
-                                    modifier = Modifier
-                                        .size(140.dp)
-                                        .clip(RoundedCornerShape(8.dp)),
-                                    contentScale = ContentScale.Crop
-                                )
-                                Spacer(modifier = Modifier.height(8.dp))
+                                items(chipPlaylists) { playlist ->
+                                    Column(
+                                        modifier = Modifier
+                                            .width(145.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .clickable { onSongClick(playlist) }
+                                    ) {
+                                        Box(modifier = Modifier.size(145.dp)) {
+                                            AsyncImage(
+                                                model = playlist.thumbnailUrl,
+                                                contentDescription = playlist.title,
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .clip(RoundedCornerShape(8.dp)),
+                                                contentScale = ContentScale.Crop
+                                            )
+                                            Box(
+                                                modifier = Modifier
+                                                    .align(Alignment.BottomEnd)
+                                                    .padding(8.dp)
+                                                    .size(32.dp)
+                                                    .clip(CircleShape)
+                                                    .background(Color.Black.copy(alpha = 0.75f)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.PlayArrow,
+                                                    contentDescription = "Reproducir Playlist",
+                                                    tint = Color.White,
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                            }
+                                        }
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Text(
+                                            text = playlist.title,
+                                            color = TextPrimary,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = playlist.artistName,
+                                            color = TextSecondary,
+                                            fontSize = 11.sp,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 2. Éxitos y canciones del tema seleccionado
+                if (chipSongs.isNotEmpty()) {
+                    item {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 14.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Éxitos de $selectedChip",
+                                color = TextPrimary,
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(DarkSurfaceVariant)
+                                    .clickable { onPlaySongList(chipSongs) }
+                                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.PlayArrow,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "Reproducir todo",
+                                        color = TextPrimary,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                            }
+                        }
+
+                        val chipSongColumns = chipSongs.chunked(4)
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)
+                        ) {
+                            items(chipSongColumns) { columnSongs ->
+                                Column(
+                                    modifier = Modifier.width(290.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    columnSongs.forEach { song ->
+                                        val songIdx = chipSongs.indexOf(song).coerceAtLeast(0)
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .clickable { onPlaySongAtIndex(chipSongs, songIdx) },
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            AsyncImage(
+                                                model = song.thumbnailUrl,
+                                                contentDescription = song.title,
+                                                modifier = Modifier
+                                                    .size(50.dp)
+                                                    .clip(RoundedCornerShape(6.dp)),
+                                                contentScale = ContentScale.Crop
+                                            )
+                                            Spacer(modifier = Modifier.width(12.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = song.title,
+                                                    color = TextPrimary,
+                                                    fontSize = 14.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                                Text(
+                                                    text = song.artistName,
+                                                    color = TextSecondary,
+                                                    fontSize = 12.sp,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                            IconButton(onClick = { selectedSongForMenu = song }) {
+                                                Icon(
+                                                    imageVector = Icons.Default.MoreVert,
+                                                    contentDescription = null,
+                                                    tint = TextSecondary,
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Si no se encontró nada
+                if (chipPlaylists.isEmpty() && chipSongs.isEmpty()) {
+                    item {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 48.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 Text(
-                                    text = playlist.title,
-                                    color = TextPrimary,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    text = playlist.artistName,
+                                    text = "No se encontraron listas ni canciones para $selectedChip",
                                     color = TextSecondary,
-                                    fontSize = 11.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                                    fontSize = 14.sp
                                 )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Button(
+                                    onClick = { viewModel.selectChip(selectedChip!!) },
+                                    colors = ButtonDefaults.buttonColors(containerColor = DarkSurfaceVariant)
+                                ) {
+                                    Text("Volver al inicio", color = TextPrimary)
+                                }
                             }
                         }
                     }
@@ -322,9 +513,13 @@ fun ExploreScreen(
             }
         }
 
-        // 3. Sección "Accesos directos" con flecha chevron
-        item {
-            Row(
+        // -------------------------------------------------------------
+        // FEED PRINCIPAL (Se muestra cuando no hay ningún chip activo)
+        // -------------------------------------------------------------
+        if (selectedChip == null) {
+            // 3. Sección "Accesos directos" con flecha chevron
+            item {
+                Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 14.dp),
@@ -465,7 +660,7 @@ fun ExploreScreen(
                             .clip(RoundedCornerShape(16.dp))
                             .background(DarkSurfaceVariant)
                             .clickable {
-                                quickPicks.firstOrNull()?.let { onSongClick(it) }
+                                onPlaySongList(quickPicks)
                             }
                             .padding(horizontal = 12.dp, vertical = 6.dp)
                     ) {
@@ -490,11 +685,12 @@ fun ExploreScreen(
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             columnList.forEach { song ->
+                                val songIdx = quickPicks.indexOf(song).coerceAtLeast(0)
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .clip(RoundedCornerShape(8.dp))
-                                        .clickable { onSongClick(song) },
+                                        .clickable { onPlaySongAtIndex(quickPicks, songIdx) },
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     AsyncImage(
@@ -632,11 +828,12 @@ fun ExploreScreen(
                             verticalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             columnMixes.forEach { mixSong ->
+                                val songIdx = longAudioMixes.indexOf(mixSong).coerceAtLeast(0)
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .clip(RoundedCornerShape(8.dp))
-                                        .clickable { onSongClick(mixSong) },
+                                        .clickable { onPlaySongAtIndex(longAudioMixes, songIdx) },
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     AsyncImage(
@@ -689,6 +886,7 @@ fun ExploreScreen(
                 }
                 Spacer(modifier = Modifier.height(28.dp))
             }
+        }
         }
 
         // Estado de carga si es necesario
@@ -825,7 +1023,7 @@ fun ExploreScreen(
                             .clickable {
                                 val sendIntent = Intent().apply {
                                     action = Intent.ACTION_SEND
-                                    putExtra(Intent.EXTRA_TEXT, "Escucha ${song.title} de ${song.artistName} en George Music: https://youtube.com/watch?v=${song.id}")
+                                    putExtra(Intent.EXTRA_TEXT, "Escucha ${song.title} de ${song.artistName} en Aura Music: https://youtube.com/watch?v=${song.id}")
                                     type = "text/plain"
                                 }
                                 context.startActivity(Intent.createChooser(sendIntent, "Compartir canción"))

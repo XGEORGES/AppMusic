@@ -49,6 +49,7 @@ import com.aura.music.ui.theme.DarkSurface
 import com.aura.music.ui.theme.OledBlack
 import com.aura.music.ui.theme.TextMuted
 import com.aura.music.ui.theme.TextPrimary
+import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.LaunchedEffect
 
 @Composable
@@ -86,6 +87,12 @@ fun RootScreen(
     }
 
     var currentDestination by remember { mutableStateOf(NavigationDestination.HOME) }
+
+    // Interceptar retroceso si el usuario está en Buscar o Biblioteca para volver a Principal
+    BackHandler(enabled = currentDestination != NavigationDestination.HOME) {
+        currentDestination = NavigationDestination.HOME
+    }
+
     val isLoading by playerViewModel.isLoading.collectAsState()
     val playbackPosition by playerViewModel.playbackPosition.collectAsState()
     val duration by playerViewModel.duration.collectAsState()
@@ -171,6 +178,8 @@ fun RootScreen(
                     ExploreScreen(
                         viewModel = exploreViewModel,
                         onSongClick = { song -> playerViewModel.playSong(song) },
+                        onPlaySongList = { songs -> playerViewModel.setQueue(songs, 0) },
+                        onPlaySongAtIndex = { songs, index -> playerViewModel.setQueue(songs, index) },
                         onPlayNext = { song -> playerViewModel.playNext(song) },
                         onAddToQueue = { song -> playerViewModel.addToQueue(song) },
                         onStartMix = { song -> playerViewModel.startMix(song) },
@@ -182,7 +191,9 @@ fun RootScreen(
                     SearchScreen(
                         viewModel = searchViewModel,
                         onSongClick = { song -> playerViewModel.playSong(song) },
+                        onPlaySongAtIndex = { songs, index -> playerViewModel.setQueue(songs, index) },
                         onPlayNext = { song -> playerViewModel.playNext(song) },
+                        onPlayNextList = { songs -> playerViewModel.playNext(songs) },
                         onStartMix = { song -> playerViewModel.startMix(song) },
                         onPinToShortcuts = { song -> exploreViewModel.pinToShortcuts(song) }
                     )

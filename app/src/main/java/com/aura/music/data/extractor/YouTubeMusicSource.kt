@@ -108,7 +108,7 @@ open class YouTubeMusicSource(
             }
 
             val playlistInfo = PlaylistInfo.getInfo(ServiceList.YouTube, url)
-            val songs = playlistInfo.relatedItems.map { streamItem ->
+            val songs = playlistInfo.relatedItems.filterIsInstance<StreamInfoItem>().map { streamItem ->
                 mapStreamItemToSong(streamItem)
             }
 

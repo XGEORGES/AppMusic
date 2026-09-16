@@ -25,8 +25,15 @@ import java.net.URLEncoder
 import javax.inject.Inject
 
 enum class LibraryTab {
-    DOWNLOADS,
-    PLAYLISTS
+    PLAYLISTS,
+    SONGS,
+    DOWNLOADS
+}
+
+enum class LibrarySortOrder(val displayName: String) {
+    RECENT("Actividad reciente"),
+    A_TO_Z("Título (A - Z)"),
+    Z_TO_A("Título (Z - A)")
 }
 
 data class PlaylistUiItem(
@@ -51,11 +58,34 @@ open class LibraryViewModel @Inject constructor(
         _selectedTab.value = tab
     }
 
-    val favorites: StateFlow<List<SongEntity>> = songDao.getFavorites()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    private val _sortOrder = MutableStateFlow(LibrarySortOrder.RECENT)
+    val sortOrder: StateFlow<LibrarySortOrder> = _sortOrder.asStateFlow()
 
-    val downloads: StateFlow<List<SongEntity>> = songDao.getDownloadedSongs()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    fun setSortOrder(order: LibrarySortOrder) {
+        _sortOrder.value = order
+    }
+
+    val favorites: StateFlow<List<SongEntity>> = combine(
+        songDao.getFavorites(),
+        _sortOrder
+    ) { list, order ->
+        when (order) {
+            LibrarySortOrder.RECENT -> list
+            LibrarySortOrder.A_TO_Z -> list.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.title })
+            LibrarySortOrder.Z_TO_A -> list.sortedWith(compareByDescending(String.CASE_INSENSITIVE_ORDER) { it.title })
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val downloads: StateFlow<List<SongEntity>> = combine(
+        songDao.getDownloadedSongs(),
+        _sortOrder
+    ) { list, order ->
+        when (order) {
+            LibrarySortOrder.RECENT -> list
+            LibrarySortOrder.A_TO_Z -> list.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.title })
+            LibrarySortOrder.Z_TO_A -> list.sortedWith(compareByDescending(String.CASE_INSENSITIVE_ORDER) { it.title })
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val playlists: StateFlow<List<PlaylistEntity>> = playlistDao.getPlaylists()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -67,9 +97,10 @@ open class LibraryViewModel @Inject constructor(
     val playlistUiItems: StateFlow<List<PlaylistUiItem>> = combine(
         playlists,
         _playlistDetails,
-        _pinnedPlaylistIds
-    ) { list, details, pinned ->
-        list.map { p ->
+        _pinnedPlaylistIds,
+        _sortOrder
+    ) { list, details, pinned, order ->
+        val mapped = list.map { p ->
             val (count, thumb) = details[p.playlistId] ?: Pair(0, null)
             PlaylistUiItem(
                 playlist = p,
@@ -77,35 +108,44 @@ open class LibraryViewModel @Inject constructor(
                 thumbnailUrl = thumb,
                 isPinned = pinned.contains(p.playlistId)
             )
-        }.sortedWith(
-            compareByDescending<PlaylistUiItem> { it.isPinned }
-                .thenByDescending { it.playlist.createdAt }
-        )
+        }
+        when (order) {
+            LibrarySortOrder.RECENT -> mapped.sortedWith(
+                compareByDescending<PlaylistUiItem> { it.isPinned }
+                    .thenByDescending { it.playlist.createdAt }
+            )
+            LibrarySortOrder.A_TO_Z -> mapped.sortedWith(
+                compareByDescending<PlaylistUiItem> { it.isPinned }
+                    .thenBy(String.CASE_INSENSITIVE_ORDER) { it.playlist.name }
+            )
+            LibrarySortOrder.Z_TO_A -> mapped.sortedWith(
+                compareByDescending<PlaylistUiItem> { it.isPinned }
+                    .thenByDescending(String.CASE_INSENSITIVE_ORDER) { it.playlist.name }
+            )
+        }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Trigger para forzar re-lectura de conteos cuando se modifican cross-refs
+    private val _playlistDetailsRefreshTrigger = MutableStateFlow(0)
 
     init {
         viewModelScope.launch {
-            playlists.collect { list ->
-                val detailsMap = mutableMapOf<Long, Pair<Int, String?>>()
-                for (p in list) {
-                    val songs = playlistDao.getSongsForPlaylist(p.playlistId)
-                    detailsMap[p.playlistId] = Pair(songs.size, songs.firstOrNull()?.thumbnailUrl)
+            // Combinar los cambios de playlists con el trigger de refresh manual
+            // para que el conteo se actualice tanto al crear/borrar playlists como al agregar/quitar canciones
+            combine(playlists, _playlistDetailsRefreshTrigger) { list, _ -> list }
+                .collect { list ->
+                    val detailsMap = mutableMapOf<Long, Pair<Int, String?>>()
+                    for (p in list) {
+                        val songs = playlistDao.getSongsForPlaylist(p.playlistId)
+                        detailsMap[p.playlistId] = Pair(songs.size, songs.firstOrNull()?.thumbnailUrl)
+                    }
+                    _playlistDetails.value = detailsMap
                 }
-                _playlistDetails.value = detailsMap
-            }
         }
     }
 
     fun refreshPlaylistDetails() {
-        viewModelScope.launch {
-            val list = playlists.value
-            val detailsMap = mutableMapOf<Long, Pair<Int, String?>>()
-            for (p in list) {
-                val songs = playlistDao.getSongsForPlaylist(p.playlistId)
-                detailsMap[p.playlistId] = Pair(songs.size, songs.firstOrNull()?.thumbnailUrl)
-            }
-            _playlistDetails.value = detailsMap
-        }
+        _playlistDetailsRefreshTrigger.value++
     }
 
     fun togglePinPlaylist(playlistId: Long) {
@@ -131,6 +171,10 @@ open class LibraryViewModel @Inject constructor(
         onProgress: (downloaded: Int, total: Int) -> Unit = { _, _ -> },
         onComplete: (downloadedCount: Int) -> Unit = {}
     ) {
+        if (playlistId == -1L) {
+            downloadAllFavorites(onComplete)
+            return
+        }
         val downloadManager = mediaDownloadManager ?: return
         viewModelScope.launch {
             val songs = playlistDao.getSongsForPlaylist(playlistId)
@@ -375,19 +419,39 @@ open class LibraryViewModel @Inject constructor(
         loadPlaylistDetailSongs(playlist.playlistId)
     }
 
+    fun openFavoritesDetail() {
+        _selectedPlaylistDetail.value = PlaylistEntity(
+            playlistId = -1L,
+            name = "Música que te gustó",
+            description = "Canciones guardadas en tu biblioteca",
+            isImported = false
+        )
+        loadPlaylistDetailSongs(-1L)
+    }
+
     fun closePlaylistDetail() {
         _selectedPlaylistDetail.value = null
         _detailSongs.value = emptyList()
+        refreshPlaylistDetails()
     }
 
     fun loadPlaylistDetailSongs(playlistId: Long) {
         viewModelScope.launch {
-            val songs = playlistDao.getSongsForPlaylist(playlistId)
-            _detailSongs.value = songs
+            if (playlistId == -1L) {
+                favorites.collect { favs ->
+                    if (_selectedPlaylistDetail.value?.playlistId == -1L) {
+                        _detailSongs.value = favs
+                    }
+                }
+            } else {
+                val songs = playlistDao.getSongsForPlaylist(playlistId)
+                _detailSongs.value = songs
+            }
         }
     }
 
     fun renamePlaylist(playlistId: Long, newName: String) {
+        if (playlistId == -1L) return
         val trimmed = newName.trim()
         if (trimmed.isEmpty()) return
         viewModelScope.launch {
@@ -403,28 +467,36 @@ open class LibraryViewModel @Inject constructor(
     fun addSongToDetailPlaylist(song: SongEntity, playlistId: Long, onDone: () -> Unit = {}) {
         viewModelScope.launch {
             songDao.insertOrUpdate(song)
-            val currentSongs = playlistDao.getSongsForPlaylist(playlistId)
-            val nextPos = currentSongs.size
-            playlistDao.insertPlaylistSongCrossRef(
-                PlaylistSongCrossRef(
-                    playlistId = playlistId,
-                    songId = song.id,
-                    positionInPlaylist = nextPos
+            if (playlistId == -1L) {
+                songDao.updateFavorite(song.id, true)
+            } else {
+                val currentSongs = playlistDao.getSongsForPlaylist(playlistId)
+                val nextPos = currentSongs.size
+                playlistDao.insertPlaylistSongCrossRef(
+                    PlaylistSongCrossRef(
+                        playlistId = playlistId,
+                        songId = song.id,
+                        positionInPlaylist = nextPos
+                    )
                 )
-            )
-            val updated = playlistDao.getSongsForPlaylist(playlistId)
-            _detailSongs.value = updated
-            refreshPlaylistDetails()
+                val updated = playlistDao.getSongsForPlaylist(playlistId)
+                _detailSongs.value = updated
+                refreshPlaylistDetails()
+            }
             onDone()
         }
     }
 
     fun removeSongFromDetailPlaylist(songId: String, playlistId: Long) {
         viewModelScope.launch {
-            playlistDao.removeSongFromPlaylist(playlistId, songId)
-            val updated = playlistDao.getSongsForPlaylist(playlistId)
-            _detailSongs.value = updated
-            refreshPlaylistDetails()
+            if (playlistId == -1L) {
+                songDao.updateFavorite(songId, false)
+            } else {
+                playlistDao.removeSongFromPlaylist(playlistId, songId)
+                val updated = playlistDao.getSongsForPlaylist(playlistId)
+                _detailSongs.value = updated
+                refreshPlaylistDetails()
+            }
         }
     }
 

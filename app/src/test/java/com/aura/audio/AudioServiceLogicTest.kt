@@ -222,4 +222,23 @@ class AudioServiceLogicTest {
         audioPlayerManager.seekToPrevious()
         org.junit.Assert.assertTrue("seekToPrevious() debe invocar onSeekPreviousRequested si está configurado", seekPrevCalled)
     }
+
+    /**
+     * Test 3.9: Verificar que al reproducir una única canción suelta (cola de 1 elemento),
+     * checkInfiniteRadioTrigger dispare inmediatamente el callback de Radio Infinita.
+     */
+    @Test
+    fun test3_9_singleSongQueueTriggersInfiniteRadio() {
+        val singleSong = SongItem(id = "single_track", title = "Solo Track", artistName = "Solo Artist", thumbnailUrl = "thumb")
+        var triggeredSongId: String? = null
+        audioPlayerManager.onInfiniteRadioTriggered = { id ->
+            triggeredSongId = id
+        }
+
+        audioPlayerManager.setQueue(listOf(singleSong), startIndex = 0, autoPlay = false)
+        audioPlayerManager.checkInfiniteRadioTrigger(isEnd = false)
+
+        assertNotNull("Debe disparar Radio Infinita si la cola solo tiene 1 canción", triggeredSongId)
+        assertEquals("single_track", triggeredSongId)
+    }
 }

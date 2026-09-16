@@ -13,6 +13,7 @@ import com.aura.music.data.repository.PlayerRepository
 import com.aura.music.service.audio.MediaDownloadManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -35,9 +36,18 @@ class ExploreViewModel @Inject constructor(
     private val _selectedChip = MutableStateFlow<String?>(null)
     val selectedChip: StateFlow<String?> = _selectedChip.asStateFlow()
 
+    private val _isChipLoading = MutableStateFlow(false)
+    val isChipLoading: StateFlow<Boolean> = _isChipLoading.asStateFlow()
+
     // Playlists obtenidas por el chip seleccionado
     private val _chipPlaylists = MutableStateFlow<List<SongEntity>>(emptyList())
     val chipPlaylists: StateFlow<List<SongEntity>> = _chipPlaylists.asStateFlow()
+
+    // Canciones / Éxitos individuales del chip seleccionado
+    private val _chipSongs = MutableStateFlow<List<SongEntity>>(emptyList())
+    val chipSongs: StateFlow<List<SongEntity>> = _chipSongs.asStateFlow()
+
+    private var chipJob: Job? = null
 
     // Playlists del usuario para los Accesos directos y para basar "SIMILARES A"
     val userPlaylists: StateFlow<List<PlaylistEntity>> = playlistDao.getPlaylists()
@@ -87,22 +97,78 @@ class ExploreViewModel @Inject constructor(
     }
 
     fun selectChip(chip: String) {
+        chipJob?.cancel()
         if (_selectedChip.value == chip) {
             // Deseleccionar chip si se vuelve a presionar
             _selectedChip.value = null
             _chipPlaylists.value = emptyList()
+            _chipSongs.value = emptyList()
+            _isChipLoading.value = false
             return
         }
         _selectedChip.value = chip
-        viewModelScope.launch(Dispatchers.IO) {
-            _isLoading.value = true
+        _chipPlaylists.value = emptyList()
+        _chipSongs.value = emptyList()
+        _isChipLoading.value = true
+
+        chipJob = viewModelScope.launch(Dispatchers.IO) {
             try {
-                musicRepository.search("$chip Playlist", FilterType.PLAYLISTS).collect { results ->
-                    _chipPlaylists.value = results.take(15)
+                val playlistQuery = when (chip.lowercase()) {
+                    "podcasts" -> "podcast en español playlist"
+                    "relajación" -> "musica relajante para meditar y descansar playlist"
+                    "sueño" -> "musica para dormir profundamente relajante playlist"
+                    "triste" -> "canciones tristes baladas desamor playlist"
+                    "actívate" -> "musica motivacion entrenamiento playlist"
+                    "energía" -> "musica con energia electronica y gym workout playlist"
+                    "rock" -> "rock clasico y alternativo hits playlist"
+                    "pop" -> "pop exitos playlist 2026"
+                    "electrónica" -> "musica electronica edm hits playlist"
+                    else -> "$chip playlist"
                 }
-            } catch (_: Exception) {
+
+                val songsQuery = when (chip.lowercase()) {
+                    "podcasts" -> "episodios podcast en español"
+                    "relajación" -> "musica instrumental relajante"
+                    "sueño" -> "sonidos y musica relajante para dormir"
+                    "triste" -> "canciones tristes de amor baladas"
+                    "actívate" -> "canciones para activarse y motivacion"
+                    "energía" -> "canciones con energia gym workout"
+                    "rock" -> "rock exitos en ingles y español"
+                    "pop" -> "pop hits"
+                    "electrónica" -> "electronic dance music edm"
+                    else -> "$chip hits"
+                }
+
+                // Carga concurrente de Playlists y Canciones
+                val playlistJob = launch {
+                    try {
+                        musicRepository.search(playlistQuery, FilterType.PLAYLISTS).collect { results ->
+                            _chipPlaylists.value = results.take(15)
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+
+                val songsJob = launch {
+                    try {
+                        musicRepository.search(songsQuery, FilterType.SONGS).collect { results ->
+                            _chipSongs.value = results.take(20)
+                            if (results.isNotEmpty()) {
+                                playerRepository.preloadStreams(results.take(2))
+                            }
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+
+                playlistJob.join()
+                songsJob.join()
+            } catch (e: Exception) {
+                e.printStackTrace()
             } finally {
-                _isLoading.value = false
+                _isChipLoading.value = false
             }
         }
     }
@@ -289,6 +355,13 @@ class ExploreViewModel @Inject constructor(
     }
 
     fun pinToShortcuts(song: SongEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                songDao.insertOrUpdate(song)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
         val current = _shortcutItems.value.toMutableList()
         if (!current.any { it.id == song.id }) {
             current.add(0, song)

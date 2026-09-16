@@ -76,8 +76,9 @@ class PlaybackService : MediaSessionService() {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 if (isPlaying) {
                     acquireLocks()
+                } else if (audioPlayerManager.player.playbackState != Player.STATE_BUFFERING) {
+                    releaseLocks()
                 }
-                // Actualizar notificación para reflejar el nuevo estado play/pause
                 updateNotification()
             }
 
@@ -90,20 +91,22 @@ class PlaybackService : MediaSessionService() {
                     Player.STATE_READY -> {
                         if (audioPlayerManager.player.isPlaying) {
                             acquireLocks()
+                        } else {
+                            releaseLocks()
                         }
                         updateNotification()
                     }
-                    Player.STATE_ENDED -> {
+                    Player.STATE_ENDED, Player.STATE_IDLE -> {
                         releaseLocks()
                         updateNotification()
                     }
-                    // STATE_IDLE: no liberar locks (es temporal durante resolución de streams)
                 }
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                // Mantener locks activos durante transición de canciones
-                acquireLocks()
+                if (audioPlayerManager.player.isPlaying) {
+                    acquireLocks()
+                }
                 updateNotification()
             }
         })
@@ -112,10 +115,10 @@ class PlaybackService : MediaSessionService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
 
-        // Manejar acciones de los botones de la notificación a través del PlayerRepository
+        // Manejar acciones explícitas de los botones de la notificación
         when (intent?.action) {
-            ACTION_PLAY     -> playerRepository.togglePlayPause()
-            ACTION_PAUSE    -> playerRepository.togglePlayPause()
+            ACTION_PLAY     -> playerRepository.play()
+            ACTION_PAUSE    -> playerRepository.pause()
             ACTION_NEXT     -> playerRepository.seekToNext()
             ACTION_PREVIOUS -> playerRepository.seekToPrevious()
         }
@@ -123,7 +126,7 @@ class PlaybackService : MediaSessionService() {
         if (audioPlayerManager.player.isPlaying) {
             acquireLocks()
         }
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? {
@@ -132,10 +135,58 @@ class PlaybackService : MediaSessionService() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         val player = audioPlayerManager.player
-        if (!player.playWhenReady || player.mediaItemCount == 0 || player.playbackState == Player.STATE_ENDED) {
+        if (!player.isPlaying && player.playbackState != Player.STATE_BUFFERING) {
+            releaseLocks()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
             stopSelf()
         }
         super.onTaskRemoved(rootIntent)
+    }
+
+    override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
+        val player = session.player
+        val song = audioPlayerManager.currentSong.value
+
+        if (song == null && player.mediaItemCount == 0) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+            return
+        }
+
+        val notification = buildNotification()
+        try {
+            if (startInForegroundRequired) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        notification,
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                    )
+                } else {
+                    startForeground(NOTIFICATION_ID, notification)
+                }
+            } else {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    stopForeground(STOP_FOREGROUND_DETACH)
+                } else {
+                    @Suppress("DEPRECATION")
+                    stopForeground(false)
+                }
+                notificationManager?.notify(NOTIFICATION_ID, notification)
+            }
+        } catch (_: Exception) {
+            // ForegroundServiceStartNotAllowedException en Android 12+
+            notificationManager?.notify(NOTIFICATION_ID, notification)
+        }
     }
 
     // ─── Notificación multimedia ───────────────────────────────────────────────
@@ -148,16 +199,36 @@ class PlaybackService : MediaSessionService() {
         if (song == null && player.mediaItemCount == 0) return
 
         val notification = buildNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        val isActivelyPlaying = player.isPlaying || player.playbackState == Player.STATE_BUFFERING
+
+        try {
+            if (isActivelyPlaying) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        notification,
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                    )
+                } else {
+                    startForeground(NOTIFICATION_ID, notification)
+                }
+            } else {
+                // Si está pausado, desanclar del foreground para respetar límites de Android
+                // pero mantener la notificación visible en la bandeja
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    stopForeground(STOP_FOREGROUND_DETACH)
+                } else {
+                    @Suppress("DEPRECATION")
+                    stopForeground(false)
+                }
+                notificationManager?.notify(NOTIFICATION_ID, notification)
+            }
+        } catch (_: Exception) {
+            // ForegroundServiceStartNotAllowedException en Android 12+:
+            // startForeground() no está permitido desde background.
+            // Actualizar solo la notificación sin promover a foreground.
+            notificationManager?.notify(NOTIFICATION_ID, notification)
         }
-        notificationManager?.notify(NOTIFICATION_ID, notification)
     }
 
     private fun buildNotification(): Notification {
@@ -206,11 +277,11 @@ class PlaybackService : MediaSessionService() {
             .setOngoing(isPlaying)
             .setSilent(true)
             .setShowWhen(false)
-            // Anterior
+            // Anterior (0)
             .addAction(androidx.media3.ui.R.drawable.exo_notification_previous, "Anterior", prevPendingIntent)
-            // Play / Pause
+            // Play / Pause (1)
             .addAction(playPauseIcon, playPauseLabel, playPausePendingIntent)
-            // Siguiente
+            // Siguiente (2)
             .addAction(androidx.media3.ui.R.drawable.exo_notification_next, "Siguiente", nextPendingIntent)
 
         // Usar MediaStyleNotificationHelper.MediaStyle de Media3 (no requiere la librería compat legacy).
@@ -219,6 +290,7 @@ class PlaybackService : MediaSessionService() {
         if (session != null) {
             builder.setStyle(
                 androidx.media3.session.MediaStyleNotificationHelper.MediaStyle(session)
+                    .setShowActionsInCompactView(0, 1, 2)
             )
         }
 
@@ -231,7 +303,7 @@ class PlaybackService : MediaSessionService() {
         if (wakeLock?.isHeld != true) {
             val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
             wakeLock = powerManager?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GeorgeMusic:PlaybackWakeLock")
-            wakeLock?.acquire()
+            wakeLock?.acquire(15 * 60 * 1000L) // 15 minutos de tiempo límite de seguridad
         }
 
         if (wifiLock?.isHeld != true) {

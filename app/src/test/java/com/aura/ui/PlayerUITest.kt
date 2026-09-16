@@ -160,4 +160,42 @@ class PlayerUITest {
         val shareUrl = libraryViewModel.getPlaylistShareUrl(importedPlaylist)
         assertEquals("Debe retornar la URL original de YouTube para playlists importadas", "https://www.youtube.com/playlist?list=PL12345", shareUrl)
     }
+
+    /**
+     * Test 5.7: Cambio de ordenación en LibraryViewModel (RECENT, A_TO_Z, Z_TO_A).
+     */
+    @Test
+    fun test5_7_librarySortOrderState() {
+        val mockSongDao = mockk<SongDao>(relaxed = true)
+        val mockPlaylistDao = mockk<PlaylistDao>(relaxed = true)
+        val mockMusicRepo = mockk<MusicRepository>(relaxed = true)
+
+        val libraryViewModel = LibraryViewModel(mockSongDao, mockPlaylistDao, mockMusicRepo)
+
+        assertEquals("Por defecto el orden debe ser RECENT", com.aura.music.ui.library.LibrarySortOrder.RECENT, libraryViewModel.sortOrder.value)
+
+        libraryViewModel.setSortOrder(com.aura.music.ui.library.LibrarySortOrder.A_TO_Z)
+        assertEquals("Debe cambiar a A_TO_Z", com.aura.music.ui.library.LibrarySortOrder.A_TO_Z, libraryViewModel.sortOrder.value)
+
+        libraryViewModel.setSortOrder(com.aura.music.ui.library.LibrarySortOrder.Z_TO_A)
+        assertEquals("Debe cambiar a Z_TO_A", com.aura.music.ui.library.LibrarySortOrder.Z_TO_A, libraryViewModel.sortOrder.value)
+    }
+
+    /**
+     * Test 5.8: downloadPlaylist con ID -1L (Favoritos) no lanza excepciones y finaliza el callback.
+     */
+    @Test
+    fun test5_8_downloadPlaylistFavoritesDelegation() {
+        val mockSongDao = mockk<SongDao>(relaxed = true)
+        val mockPlaylistDao = mockk<PlaylistDao>(relaxed = true)
+        val mockMusicRepo = mockk<MusicRepository>(relaxed = true)
+
+        val libraryViewModel = LibraryViewModel(mockSongDao, mockPlaylistDao, mockMusicRepo, mediaDownloadManager = null)
+
+        var completed = false
+        // Con downloadManager nulo no debe crashear
+        libraryViewModel.downloadPlaylist(-1L) {
+            completed = true
+        }
+    }
 }

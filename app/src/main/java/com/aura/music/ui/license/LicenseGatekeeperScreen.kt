@@ -107,7 +107,7 @@ fun LicenseGatekeeperScreen(
             Spacer(modifier = Modifier.height(16.dp))
 
             Text(
-                text = "George Music",
+                text = "Aura Music",
                 color = TextPrimary,
                 fontSize = 24.sp,
                 fontWeight = FontWeight.Bold

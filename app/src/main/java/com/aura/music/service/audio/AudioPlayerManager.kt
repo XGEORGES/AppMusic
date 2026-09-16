@@ -12,6 +12,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.ResolvingDataSource
@@ -128,13 +129,23 @@ class AudioPlayerManager(
             }
         }
 
+        override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+            val d = player.duration
+            if (d > 0 && d != C.TIME_UNSET) {
+                _duration.value = d
+            }
+        }
+
         override fun onPlaybackStateChanged(playbackState: Int) {
             when (playbackState) {
                 Player.STATE_BUFFERING -> {
                     _isLoading.value = true
                 }
                 Player.STATE_READY -> {
-                    _duration.value = player.duration.coerceAtLeast(0L)
+                    val d = player.duration
+                    if (d > 0 && d != C.TIME_UNSET) {
+                        _duration.value = d
+                    }
                     _isLoading.value = false
                 }
                 Player.STATE_ENDED -> {
@@ -157,6 +168,15 @@ class AudioPlayerManager(
             if (index in currentList.indices) {
                 val song = currentList[index]
                 _currentSong.value = song
+                _currentPosition.value = 0L
+                val d = player.duration
+                if (d > 0 && d != C.TIME_UNSET) {
+                    _duration.value = d
+                } else if (song.durationSeconds > 0) {
+                    _duration.value = song.durationSeconds * 1000L
+                } else {
+                    _duration.value = 0L
+                }
                 onSongTransitionTriggered?.invoke(song)
             }
             checkInfiniteRadioTrigger(isEnd = false)
@@ -232,7 +252,10 @@ class AudioPlayerManager(
         player.setMediaItems(mediaItems, startIndex, 0L)
         player.prepare()
         if (startIndex in songs.indices) {
-            _currentSong.value = songs[startIndex]
+            val song = songs[startIndex]
+            _currentSong.value = song
+            _currentPosition.value = 0L
+            _duration.value = if (song.durationSeconds > 0) song.durationSeconds * 1000L else 0L
         }
         if (autoPlay) {
             ensureServiceStarted()
@@ -295,7 +318,8 @@ class AudioPlayerManager(
             val intent = android.content.Intent(context, PlaybackService::class.java)
             context.startService(intent)
         } catch (_: Exception) {
-            // Android gestiona el enlace mediante MediaSession automáticamente
+            // Android puede bloquear startService desde background en Android 12+.
+            // La MediaSession mantiene el servicio activo cuando hay un controlador conectado.
         }
     }
 
@@ -370,6 +394,10 @@ class AudioPlayerManager(
                 if (player.isPlaying) {
                     _currentPosition.value = player.currentPosition
                 }
+                val d = player.duration
+                if (d > 0 && d != C.TIME_UNSET && _duration.value != d) {
+                    _duration.value = d
+                }
                 mainHandler.postDelayed(this, 500)
             }
         })
@@ -377,8 +405,19 @@ class AudioPlayerManager(
 
     fun songToMediaItem(song: SongItem, streamUrl: String? = null): MediaItem {
         val uri = when {
-            !song.localFilePath.isNullOrBlank() -> Uri.parse(song.localFilePath)
-            !streamUrl.isNullOrBlank() -> Uri.parse(streamUrl)
+            !song.localFilePath.isNullOrBlank() -> {
+                val file = java.io.File(song.localFilePath)
+                if (file.exists()) Uri.fromFile(file) else Uri.parse(song.localFilePath)
+            }
+            !streamUrl.isNullOrBlank() -> {
+                if (streamUrl.startsWith("/") || streamUrl.startsWith("file:")) {
+                    val path = streamUrl.removePrefix("file://")
+                    val file = java.io.File(path)
+                    if (file.exists()) Uri.fromFile(file) else Uri.parse(streamUrl)
+                } else {
+                    Uri.parse(streamUrl)
+                }
+            }
             else -> Uri.parse("https://youtube.com/watch?v=${song.id}")
         }
 
@@ -412,7 +451,7 @@ class AudioPlayerManager(
         val isCurrentPlaceholder = isPlaceholderUrl(existingUri)
 
         if (isCurrent) {
-            val shouldStartPlayback = isCurrentPlaceholder || player.playerError != null || !player.isPlaying
+            val shouldStartPlayback = isCurrentPlaceholder || player.playerError != null
             player.replaceMediaItem(index, updatedMediaItem)
             if (shouldStartPlayback) {
                 player.seekTo(index, 0L)
@@ -429,6 +468,10 @@ class AudioPlayerManager(
     fun playStream(song: SongItem, streamUrl: String) {
         ensureServiceStarted()
         _currentSong.value = song
+        _currentPosition.value = 0L
+        if (song.durationSeconds > 0) {
+            _duration.value = song.durationSeconds * 1000L
+        }
         if (song.localFilePath.isNullOrBlank()) {
             _isLoading.value = true
         }
@@ -446,12 +489,14 @@ class AudioPlayerManager(
             }
             player.prepare()
             player.play()
+            checkInfiniteRadioTrigger(isEnd = false)
         } else {
             // Si se reproduce una canción suelta fuera de cola previa
             _queue.value = listOf(song)
             player.setMediaItem(mediaItem)
             player.prepare()
             player.play()
+            checkInfiniteRadioTrigger(isEnd = false)
         }
     }
 

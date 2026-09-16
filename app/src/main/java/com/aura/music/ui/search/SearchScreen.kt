@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
@@ -81,17 +82,25 @@ import com.aura.music.ui.theme.TextMuted
 import com.aura.music.ui.theme.TextPrimary
 import com.aura.music.ui.theme.TextSecondary
 
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SearchScreen(
     viewModel: SearchViewModel,
     onSongClick: (SongEntity) -> Unit,
+    onPlaySongAtIndex: (List<SongEntity>, Int) -> Unit = { songs, index ->
+        if (index in songs.indices) onSongClick(songs[index])
+    },
     onPlayNext: (SongEntity) -> Unit = {},
+    onPlayNextList: (List<SongEntity>) -> Unit = { songs -> songs.forEach { onPlayNext(it) } },
     onStartMix: (SongEntity) -> Unit = {},
     onPinToShortcuts: (SongEntity) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     val query by viewModel.query.collectAsState()
     val selectedFilter by viewModel.selectedFilter.collectAsState()
     val searchResults by viewModel.searchResults.collectAsState()
@@ -229,6 +238,74 @@ fun SearchScreen(
             }
         }
 
+        // Estado inicial de búsqueda (Opción A: mensaje y sugerencias populares)
+        if (query.isBlank() && searchHistory.isEmpty()) {
+            item {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 40.dp, bottom = 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Search,
+                        contentDescription = null,
+                        tint = TextMuted,
+                        modifier = Modifier.size(56.dp)
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "Encuentra tus canciones, artistas o playlists favoritas",
+                        color = TextSecondary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 32.dp)
+                    )
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Text(
+                        text = "Sugerencias",
+                        color = TextMuted,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    val suggestions = listOf("Éxitos del momento", "Pop", "Rock", "Mixes", "Baladas")
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(horizontal = 4.dp)
+                    ) {
+                        suggestions.take(3).forEach { suggestion ->
+                            SuggestionChip(
+                                onClick = { viewModel.onQueryChanged(suggestion) },
+                                label = { Text(suggestion, color = TextPrimary, fontSize = 12.sp) },
+                                colors = SuggestionChipDefaults.suggestionChipColors(
+                                    containerColor = DarkSurfaceVariant
+                                ),
+                                shape = RoundedCornerShape(20.dp)
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(horizontal = 4.dp)
+                    ) {
+                        suggestions.drop(3).forEach { suggestion ->
+                            SuggestionChip(
+                                onClick = { viewModel.onQueryChanged(suggestion) },
+                                label = { Text(suggestion, color = TextPrimary, fontSize = 12.sp) },
+                                colors = SuggestionChipDefaults.suggestionChipColors(
+                                    containerColor = DarkSurfaceVariant
+                                ),
+                                shape = RoundedCornerShape(20.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // Resultados o estado de carga
         if (isLoading) {
             item {
@@ -242,13 +319,19 @@ fun SearchScreen(
                 }
             }
         } else if (searchResults.isNotEmpty()) {
-            items(searchResults) { song ->
+            itemsIndexed(searchResults) { index, song ->
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(vertical = 6.dp)
                         .clip(RoundedCornerShape(8.dp))
-                        .clickable { onSongClick(song) },
+                        .clickable {
+                            if (song.id.startsWith("PL") || song.id.startsWith("PL_") || song.id.startsWith("OLAK5uy_") || song.id.startsWith("VL")) {
+                                onSongClick(song)
+                            } else {
+                                onPlaySongAtIndex(searchResults, index)
+                            }
+                        },
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     AsyncImage(
@@ -352,9 +435,24 @@ fun SearchScreen(
                             .clip(RoundedCornerShape(10.dp))
                             .background(DarkSurfaceVariant)
                             .clickable {
-                                onPlayNext(song)
+                                val target = song
                                 selectedSongForMenu = null
-                                Toast.makeText(context, "Se reproducirá a continuación", Toast.LENGTH_SHORT).show()
+                                val isPlaylist = target.id.startsWith("PL") || target.id.startsWith("PL_") || target.id.startsWith("OLAK5uy_") || target.id.startsWith("VL")
+                                if (isPlaylist) {
+                                    Toast.makeText(context, "Cargando canciones de la playlist...", Toast.LENGTH_SHORT).show()
+                                    coroutineScope.launch {
+                                        val playlistSongs = viewModel.getPlaylistSongs(target.id)
+                                        if (playlistSongs.isNotEmpty()) {
+                                            onPlayNextList(playlistSongs)
+                                            Toast.makeText(context, "${playlistSongs.size} canciones añadidas a continuación", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            Toast.makeText(context, "No se pudieron obtener canciones de la playlist", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                } else {
+                                    onPlayNext(target)
+                                    Toast.makeText(context, "Se reproducirá a continuación", Toast.LENGTH_SHORT).show()
+                                }
                             }
                             .padding(vertical = 14.dp, horizontal = 6.dp),
                         contentAlignment = Alignment.Center
@@ -419,8 +517,23 @@ fun SearchScreen(
                     icon = Icons.Default.Radio,
                     title = "Comenzar mix",
                     onClick = {
-                        onStartMix(song)
+                        val target = song
                         selectedSongForMenu = null
+                        val isPlaylist = target.id.startsWith("PL") || target.id.startsWith("PL_") || target.id.startsWith("OLAK5uy_") || target.id.startsWith("VL")
+                        if (isPlaylist) {
+                            Toast.makeText(context, "Iniciando mix...", Toast.LENGTH_SHORT).show()
+                            coroutineScope.launch {
+                                val playlistSongs = viewModel.getPlaylistSongs(target.id)
+                                if (playlistSongs.isNotEmpty()) {
+                                    onStartMix(playlistSongs.first())
+                                } else {
+                                    Toast.makeText(context, "No se pudieron obtener canciones para el mix", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        } else {
+                            onStartMix(target)
+                            Toast.makeText(context, "Iniciando mix de '${target.title}'...", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 )
 
@@ -429,9 +542,15 @@ fun SearchScreen(
                     icon = Icons.Default.BookmarkBorder,
                     title = "Guardar en la biblioteca",
                     onClick = {
-                        viewModel.saveToLibrary(song)
+                        val target = song
                         selectedSongForMenu = null
-                        Toast.makeText(context, "Guardado en la biblioteca", Toast.LENGTH_SHORT).show()
+                        val isPlaylist = target.id.startsWith("PL") || target.id.startsWith("PL_") || target.id.startsWith("OLAK5uy_") || target.id.startsWith("VL")
+                        if (isPlaylist) {
+                            Toast.makeText(context, "Guardando playlist en la biblioteca...", Toast.LENGTH_SHORT).show()
+                        }
+                        viewModel.saveToLibrary(target) { success, msg ->
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                        }
                     }
                 )
 
@@ -440,11 +559,12 @@ fun SearchScreen(
                     icon = Icons.Default.Download,
                     title = "Descargar",
                     onClick = {
-                        viewModel.downloadSong(song) { _, msg ->
+                        val target = song
+                        selectedSongForMenu = null
+                        Toast.makeText(context, "Iniciando descarga...", Toast.LENGTH_SHORT).show()
+                        viewModel.downloadSong(target) { success, msg ->
                             Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                         }
-                        selectedSongForMenu = null
-                        Toast.makeText(context, "Descarga iniciada...", Toast.LENGTH_SHORT).show()
                     }
                 )
 
@@ -576,9 +696,15 @@ fun SearchScreen(
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(8.dp))
                                     .clickable {
-                                        viewModel.addSongToPlaylist(targetSong, playlist.playlistId)
-                                        Toast.makeText(context, "Añadida a '${playlist.name}'", Toast.LENGTH_SHORT).show()
+                                        val isPlaylist = targetSong.id.startsWith("PL") || targetSong.id.startsWith("PL_") || targetSong.id.startsWith("OLAK5uy_")
+                                        val targetName = playlist.name
                                         songForPlaylistSelection = null
+                                        if (isPlaylist) {
+                                            Toast.makeText(context, "Añadiendo canciones a '$targetName'...", Toast.LENGTH_SHORT).show()
+                                        }
+                                        viewModel.addSongToPlaylist(targetSong, playlist.playlistId) {
+                                            Toast.makeText(context, "Añadida a '$targetName'", Toast.LENGTH_SHORT).show()
+                                        }
                                     }
                                     .padding(vertical = 10.dp, horizontal = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically
@@ -659,8 +785,13 @@ fun SearchScreen(
                     onClick = {
                         val name = newPlaylistNameInput.trim()
                         if (name.isNotEmpty()) {
-                            viewModel.createPlaylistAndAddSong(name, targetSong)
-                            Toast.makeText(context, "Playlist '$name' creada y canción agregada", Toast.LENGTH_SHORT).show()
+                            val isPlaylist = targetSong.id.startsWith("PL") || targetSong.id.startsWith("PL_") || targetSong.id.startsWith("OLAK5uy_")
+                            if (isPlaylist) {
+                                Toast.makeText(context, "Creando playlist y agregando canciones...", Toast.LENGTH_SHORT).show()
+                            }
+                            viewModel.createPlaylistAndAddSong(name, targetSong) {
+                                Toast.makeText(context, "Playlist '$name' creada y guardada", Toast.LENGTH_SHORT).show()
+                            }
                             showCreatePlaylistDialog = false
                             songForPlaylistSelection = null
                         }
