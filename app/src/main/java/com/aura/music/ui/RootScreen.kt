@@ -50,7 +50,14 @@ import com.aura.music.ui.theme.OledBlack
 import com.aura.music.ui.theme.TextMuted
 import com.aura.music.ui.theme.TextPrimary
 import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.aura.music.core.util.BatteryOptimizationHelper
+import com.aura.music.ui.dialogs.BatteryOptimizationDialog
 
 @Composable
 fun RootScreen(
@@ -61,8 +68,29 @@ fun RootScreen(
     licenseViewModel: LicenseViewModel,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val licenseStatus by licenseViewModel.licenseStatus.collectAsState()
     var showLicenseSheet by remember { mutableStateOf(false) }
+
+    var showBatteryDialog by remember {
+        mutableStateOf(!BatteryOptimizationHelper.isFullyOptimizedForBackground(context))
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                if (BatteryOptimizationHelper.isFullyOptimizedForBackground(context)) {
+                    showBatteryDialog = false
+                    BatteryOptimizationHelper.dismissGuideNotification(context)
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     val currentSong by playerViewModel.currentPlayingSong.collectAsState()
     val isPlaying by playerViewModel.isPlaying.collectAsState()
@@ -100,6 +128,7 @@ fun RootScreen(
     val repeatMode by playerViewModel.repeatMode.collectAsState()
     val shuffleEnabled by playerViewModel.shuffleModeEnabled.collectAsState()
     val isInfiniteRadioEnabled by playerViewModel.isInfiniteRadioEnabled.collectAsState()
+    val isDjAuraMode by playerViewModel.isDjAuraMode.collectAsState()
     val isExpanded by playerViewModel.isExpanded.collectAsState()
 
     val progress = if (duration > 0) playbackPosition.toFloat() / duration.toFloat() else 0f
@@ -249,7 +278,8 @@ fun RootScreen(
                 onToggleShuffle = { playerViewModel.toggleShuffle() },
                 onSongClick = { song -> playerViewModel.playSong(song) },
                 isInfiniteRadioEnabled = isInfiniteRadioEnabled,
-                onToggleInfiniteRadio = { playerViewModel.setInfiniteRadioEnabled(it) }
+                onToggleInfiniteRadio = { playerViewModel.setInfiniteRadioEnabled(it) },
+                isDjAuraMode = isDjAuraMode
             )
         }
     }
@@ -259,6 +289,15 @@ fun RootScreen(
         LicenseManagementSheet(
             viewModel = licenseViewModel,
             onDismiss = { showLicenseSheet = false }
+        )
+    }
+
+    // Mensaje principal interactivo para optimización de batería y segundo plano (obligatorio hasta configurar)
+    if (showBatteryDialog && !BatteryOptimizationHelper.isFullyOptimizedForBackground(context)) {
+        BatteryOptimizationDialog(
+            onOpenSettings = {
+                context.startActivity(BatteryOptimizationHelper.getAppDetailsSettingsIntent(context))
+            }
         )
     }
 }

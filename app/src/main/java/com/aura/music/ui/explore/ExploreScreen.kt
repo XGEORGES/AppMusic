@@ -6,6 +6,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.res.painterResource
 import com.aura.music.R
+import com.aura.music.ui.explore.components.DjAuraCard
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -128,6 +129,7 @@ fun ExploreScreen(
     val userPlaylists by viewModel.userPlaylists.collectAsState()
     val longAudioMixes by viewModel.longAudioMixes.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
+    val djAuraUiState by viewModel.djAuraUiState.collectAsState()
 
     var selectedSongForMenu by remember { mutableStateOf<SongEntity?>(null) }
     var songForPlaylistSelection by remember { mutableStateOf<SongEntity?>(null) }
@@ -159,7 +161,7 @@ fun ExploreScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     // Logo oficial de Aura Music
                     Image(
-                        painter = painterResource(id = R.mipmap.ic_launcher_round),
+                        painter = painterResource(id = R.drawable.ic_launcher_foreground),
                         contentDescription = "Logo Aura Music",
                         modifier = Modifier
                             .size(34.dp)
@@ -247,7 +249,24 @@ fun ExploreScreen(
             }
         }
 
-        // 2. Chips / Píldoras temáticas redondeadas (Podcasts, Relajación, Sueño, etc.)
+        // 2. Tarjeta interactiva y destacada de DJ Aura
+        item {
+            DjAuraCard(
+                uiState = djAuraUiState,
+                quickChips = viewModel.djQuickChips,
+                onActivateDj = { prompt -> viewModel.activateDjAura(prompt) },
+                onAdjustMix = { adjustment -> viewModel.adjustDjMix(adjustment) },
+                onSaveMixAsPlaylist = {
+                    viewModel.saveCurrentDjMixAsPlaylist { msg ->
+                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                    }
+                },
+                onDismissDj = { viewModel.dismissDjAura() },
+                modifier = Modifier.padding(bottom = 16.dp)
+            )
+        }
+
+        // 3. Chips / Píldoras temáticas redondeadas (Podcasts, Relajación, Sueño, etc.)
         item {
             LazyRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),

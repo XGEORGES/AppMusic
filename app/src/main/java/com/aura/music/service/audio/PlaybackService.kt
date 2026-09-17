@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.PowerManager
 import androidx.annotation.OptIn
 import androidx.core.app.NotificationCompat
+import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -62,9 +63,29 @@ class PlaybackService : MediaSessionService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
+        // ForwardingPlayer para interceptar comandos de reproducción del sistema
+        // (Notificación, lockscreen, auriculares Bluetooth, etc.) y coordinar el estado
+        val forwardingPlayer = object : ForwardingPlayer(audioPlayerManager.player) {
+            override fun pause() {
+                audioPlayerManager.pause()
+            }
+
+            override fun play() {
+                audioPlayerManager.play()
+            }
+
+            override fun setPlayWhenReady(playWhenReady: Boolean) {
+                if (!playWhenReady) {
+                    audioPlayerManager.pause()
+                } else {
+                    audioPlayerManager.play()
+                }
+            }
+        }
+
         // Crear MediaSession para compatibilidad con controles externos
         // (Bluetooth, auriculares, Google Assistant, etc.)
-        mediaSession = MediaSession.Builder(this, audioPlayerManager.player)
+        mediaSession = MediaSession.Builder(this, forwardingPlayer)
             .setSessionActivity(pendingIntent)
             .build()
 
@@ -76,7 +97,8 @@ class PlaybackService : MediaSessionService() {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 if (isPlaying) {
                     acquireLocks()
-                } else if (audioPlayerManager.player.playbackState != Player.STATE_BUFFERING) {
+                } else if (!audioPlayerManager.player.playWhenReady || audioPlayerManager.userInitiatedPause) {
+                    // Solo liberar locks cuando el USUARIO pausó explícitamente.
                     releaseLocks()
                 }
                 updateNotification()
@@ -91,22 +113,32 @@ class PlaybackService : MediaSessionService() {
                     Player.STATE_READY -> {
                         if (audioPlayerManager.player.isPlaying) {
                             acquireLocks()
-                        } else {
+                        }
+                        // No liberar locks en STATE_READY sin reproducción:
+                        // puede ser una transición entre canciones donde el audio focus
+                        // aún no se ha re-adquirido.
+                        updateNotification()
+                    }
+                    Player.STATE_ENDED -> {
+                        // Solo liberar locks si la cola realmente terminó
+                        if (!audioPlayerManager.player.hasNextMediaItem() &&
+                            audioPlayerManager.userInitiatedPause) {
                             releaseLocks()
                         }
                         updateNotification()
                     }
-                    Player.STATE_ENDED, Player.STATE_IDLE -> {
-                        releaseLocks()
+                    Player.STATE_IDLE -> {
+                        if (audioPlayerManager.userInitiatedPause) {
+                            releaseLocks()
+                        }
                         updateNotification()
                     }
                 }
             }
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                if (audioPlayerManager.player.isPlaying) {
-                    acquireLocks()
-                }
+                // Siempre mantener locks durante transiciones de canciones
+                acquireLocks()
                 updateNotification()
             }
         })
@@ -126,7 +158,7 @@ class PlaybackService : MediaSessionService() {
         if (audioPlayerManager.player.isPlaying) {
             acquireLocks()
         }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? {
@@ -200,9 +232,13 @@ class PlaybackService : MediaSessionService() {
 
         val notification = buildNotification()
         val isActivelyPlaying = player.isPlaying || player.playbackState == Player.STATE_BUFFERING
+        // Mantener foreground durante transiciones del sistema (no pausadas por el usuario)
+        // para evitar que MIUI/SmartPower baje la prioridad del proceso
+        val isPausedByUser = audioPlayerManager.userInitiatedPause || !player.playWhenReady
+        val keepForeground = isActivelyPlaying || !isPausedByUser
 
         try {
-            if (isActivelyPlaying) {
+            if (keepForeground) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     startForeground(
                         NOTIFICATION_ID,
@@ -213,8 +249,7 @@ class PlaybackService : MediaSessionService() {
                     startForeground(NOTIFICATION_ID, notification)
                 }
             } else {
-                // Si está pausado, desanclar del foreground para respetar límites de Android
-                // pero mantener la notificación visible en la bandeja
+                // El usuario pausó explícitamente: desanclar del foreground
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                     stopForeground(STOP_FOREGROUND_DETACH)
                 } else {
@@ -300,11 +335,12 @@ class PlaybackService : MediaSessionService() {
     // ─── WakeLocks ────────────────────────────────────────────────────────────
 
     private fun acquireLocks() {
-        if (wakeLock?.isHeld != true) {
+        if (wakeLock == null) {
             val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
             wakeLock = powerManager?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GeorgeMusic:PlaybackWakeLock")
-            wakeLock?.acquire(15 * 60 * 1000L) // 15 minutos de tiempo límite de seguridad
         }
+        // Siempre renovar el timeout al adquirir (cubre sesiones largas de DJ Aura)
+        wakeLock?.acquire(4 * 60 * 60 * 1000L) // 4 horas de tiempo límite de seguridad
 
         if (wifiLock?.isHeld != true) {
             val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager

@@ -52,7 +52,7 @@ class MusicRepositoryTest {
 
         musicRepository = MusicRepository(database, songDao, playlistDao, mockSource)
         playerManager = AudioPlayerManager(context)
-        playerRepository = PlayerRepository(songDao, playerManager, mockSource)
+        playerRepository = PlayerRepository(songDao, playerManager, mockSource, dagger.Lazy { mockk(relaxed = true) })
     }
 
     @After

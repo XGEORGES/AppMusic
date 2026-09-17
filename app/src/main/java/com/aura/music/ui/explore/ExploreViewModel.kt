@@ -14,12 +14,16 @@ import com.aura.music.service.audio.MediaDownloadManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.launch
+import com.aura.music.data.gemini.DjAdjustmentType
+import com.aura.music.data.gemini.DjAuraUiState
+import com.aura.music.data.repository.DjAuraRepository
+import com.aura.music.data.repository.DjProgress
 import javax.inject.Inject
 
 @HiltViewModel
@@ -28,8 +32,23 @@ class ExploreViewModel @Inject constructor(
     private val songDao: SongDao,
     private val playlistDao: PlaylistDao,
     private val downloadManager: MediaDownloadManager,
-    private val playerRepository: PlayerRepository
+    private val playerRepository: PlayerRepository,
+    private val djAuraRepository: DjAuraRepository
 ) : ViewModel() {
+
+    val djQuickChips = listOf(
+        "🥊 Gym / Bestia",
+        "🚴 Full Bici",
+        "🎌 Top Anime",
+        "☕ Enfoque",
+        "🌙 Chill",
+        "⚡ Fiesta"
+    )
+
+    private val _djAuraUiState = MutableStateFlow<DjAuraUiState>(DjAuraUiState.Idle)
+    val djAuraUiState: StateFlow<DjAuraUiState> = _djAuraUiState.asStateFlow()
+
+    private var djJob: Job? = null
 
     val chips = listOf("Podcasts", "Relajación", "Sueño", "Triste", "Actívate", "Energía", "Rock", "Pop", "Electrónica")
 
@@ -79,6 +98,7 @@ class ExploreViewModel @Inject constructor(
     init {
         loadHomeScreenData()
         observeUserDataAndPlaylists()
+        observeDjAuraEvents()
     }
 
     private fun observeUserDataAndPlaylists() {
@@ -385,5 +405,199 @@ class ExploreViewModel @Inject constructor(
                 onResult(false, error.message ?: "Error al descargar")
             }
         }
+    }
+
+    private fun observeDjAuraEvents() {
+        // Observar saltos rápidos para registrar canciones descartadas
+        playerRepository.onSongSkipped = { song ->
+            djAuraRepository.recordSongSkipped(song)
+        }
+
+        // Observar eventos de extensión automática desde el PlayerRepository (que corre en background independiente)
+        viewModelScope.launch {
+            playerRepository.djExtendEvent.collect { event ->
+                val currentState = _djAuraUiState.value as? DjAuraUiState.ActiveMix ?: return@collect
+                when (event) {
+                    is PlayerRepository.DjExtendEvent.Loading -> {
+                        _djAuraUiState.value = currentState.copy(isLoadingMore = true)
+                    }
+                    is PlayerRepository.DjExtendEvent.SongsAdded -> {
+                        val updatedSessionSongs = currentState.songs + event.songs
+                        _djAuraUiState.value = currentState.copy(
+                            shoutout = event.shoutout,
+                            comment = event.comment,
+                            vibeTag = event.vibeTag,
+                            songs = updatedSessionSongs,
+                            isLoadingMore = false
+                        )
+                    }
+                    is PlayerRepository.DjExtendEvent.Error -> {
+                        _djAuraUiState.value = currentState.copy(isLoadingMore = false)
+                    }
+                }
+            }
+        }
+
+        // Observar saltos rápidos para desplegar sugerencias de calibración de DJ Aura
+        viewModelScope.launch {
+            playerRepository.quickSkipCount.collect { count ->
+                val currentState = _djAuraUiState.value
+                if (count >= 2 && currentState is DjAuraUiState.ActiveMix) {
+                    _djAuraUiState.value = currentState.copy(showAdjustmentOptions = true)
+                }
+            }
+        }
+
+        // Registrar canciones que suenan mientras DJ Aura está activo
+        viewModelScope.launch {
+            playerRepository.currentPlayingSong.collect { song ->
+                if (song != null && playerRepository.isDjAuraMode.value) {
+                    djAuraRepository.recordSongPlayed(song)
+                }
+            }
+        }
+    }
+
+    fun extendDjSession() {
+        val currentState = _djAuraUiState.value as? DjAuraUiState.ActiveMix ?: return
+        _djAuraUiState.value = currentState.copy(isLoadingMore = true)
+        playerRepository.triggerDjExtend()
+    }
+
+    fun activateDjAura(prompt: String) {
+        if (prompt.isBlank()) return
+        djJob?.cancel()
+        playerRepository.setDjAuraMode(true)
+        playerRepository.resetQuickSkipCount()
+
+        djJob = viewModelScope.launch {
+            djAuraRepository.generateMix(prompt).collect { progress ->
+                when (progress) {
+                    is DjProgress.Loading -> {
+                        _djAuraUiState.value = DjAuraUiState.Loading(progress.message)
+                    }
+                    is DjProgress.FirstSongReady -> {
+                        // Reproducir inmediatamente la primera canción resuelta
+                        playerRepository.setQueue(listOf(progress.firstSong), startIndex = 0)
+                        _djAuraUiState.value = DjAuraUiState.ActiveMix(
+                            shoutout = progress.shoutout,
+                            comment = progress.comment,
+                            vibeTag = progress.vibeTag,
+                            songs = listOf(progress.firstSong),
+                            promptUsed = progress.promptUsed,
+                            isLoadingMore = true,
+                            showAdjustmentOptions = false
+                        )
+                    }
+                    is DjProgress.FullMixReady -> {
+                        val currentSong = playerRepository.currentPlayingSong.value
+                        val startIndex = if (currentSong != null) {
+                            val idx = progress.songs.indexOfFirst { it.id == currentSong.id }
+                            if (idx != -1) idx else 0
+                        } else 0
+
+                        playerRepository.setQueue(progress.songs, startIndex = startIndex)
+                        _djAuraUiState.value = DjAuraUiState.ActiveMix(
+                            shoutout = progress.shoutout,
+                            comment = progress.comment,
+                            vibeTag = progress.vibeTag,
+                            songs = progress.songs,
+                            promptUsed = progress.promptUsed,
+                            isLoadingMore = false,
+                            showAdjustmentOptions = false
+                        )
+                    }
+                    is DjProgress.Error -> {
+                        _djAuraUiState.value = DjAuraUiState.Error(
+                            message = progress.message,
+                            lastPrompt = prompt
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun adjustDjMix(adjustment: DjAdjustmentType) {
+        djJob?.cancel()
+        playerRepository.resetQuickSkipCount()
+
+        djJob = viewModelScope.launch {
+            val currentState = _djAuraUiState.value as? DjAuraUiState.ActiveMix
+            val currentPrompt = currentState?.promptUsed ?: ""
+
+            djAuraRepository.adjustMix(adjustment).collect { progress ->
+                when (progress) {
+                    is DjProgress.Loading -> {
+                        _djAuraUiState.value = DjAuraUiState.Loading(progress.message)
+                    }
+                    is DjProgress.FirstSongReady -> {
+                        val currentSong = playerRepository.currentPlayingSong.value
+                        if (currentSong != null && playerRepository.isPlaying.value) {
+                            playerRepository.playNext(progress.firstSong)
+                        } else {
+                            playerRepository.playSong(progress.firstSong)
+                        }
+
+                        _djAuraUiState.value = DjAuraUiState.ActiveMix(
+                            shoutout = progress.shoutout,
+                            comment = progress.comment,
+                            vibeTag = progress.vibeTag,
+                            songs = listOfNotNull(currentSong, progress.firstSong),
+                            promptUsed = currentPrompt,
+                            isLoadingMore = true,
+                            showAdjustmentOptions = false
+                        )
+                    }
+                    is DjProgress.FullMixReady -> {
+                        val currentSong = playerRepository.currentPlayingSong.value
+                        playerRepository.replaceUpcomingQueue(progress.songs)
+
+                        val displaySongs = if (currentSong != null) {
+                            listOf(currentSong) + progress.songs.filter { it.id != currentSong.id }
+                        } else {
+                            progress.songs
+                        }
+
+                        _djAuraUiState.value = DjAuraUiState.ActiveMix(
+                            shoutout = progress.shoutout,
+                            comment = progress.comment,
+                            vibeTag = progress.vibeTag,
+                            songs = displaySongs,
+                            promptUsed = currentPrompt,
+                            isLoadingMore = false,
+                            showAdjustmentOptions = false
+                        )
+                    }
+                    is DjProgress.Error -> {
+                        _djAuraUiState.value = DjAuraUiState.Error(
+                            message = progress.message,
+                            lastPrompt = currentPrompt
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun saveCurrentDjMixAsPlaylist(onSaved: (String) -> Unit) {
+        val state = _djAuraUiState.value as? DjAuraUiState.ActiveMix ?: return
+        viewModelScope.launch {
+            val name = "DJ Aura: ${state.vibeTag.ifBlank { state.promptUsed }}"
+            val description = state.comment
+            val playlistId = djAuraRepository.saveMixAsPlaylist(name, description, state.songs)
+            if (playlistId > 0) {
+                onSaved("¡Sesión guardada en Mi Biblioteca!")
+            } else {
+                onSaved("No se pudo guardar la playlist")
+            }
+        }
+    }
+
+    fun dismissDjAura() {
+        djJob?.cancel()
+        _djAuraUiState.value = DjAuraUiState.Idle
+        playerRepository.setDjAuraMode(false)
+        playerRepository.resetQuickSkipCount()
     }
 }

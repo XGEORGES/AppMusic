@@ -1,12 +1,14 @@
 package com.aura.music.ui.player
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -98,6 +100,7 @@ fun ExpandedPlayerView(
     onSongClick: (SongEntity) -> Unit = {},
     isInfiniteRadioEnabled: Boolean = true,
     onToggleInfiniteRadio: (Boolean) -> Unit = {},
+    isDjAuraMode: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     if (song == null) return
@@ -368,6 +371,7 @@ fun ExpandedPlayerView(
                 val nextSong = if (currentIndex != -1 && currentIndex + 1 < queue.size) queue[currentIndex + 1] else null
                 val upNextLabel = when {
                     nextSong != null -> "A continuación • ${nextSong.title}"
+                    isDjAuraMode -> "A continuación • Sesión con Dj Aura"
                     isInfiniteRadioEnabled -> "A continuación • Radio infinita"
                     repeatMode == Player.REPEAT_MODE_ALL && queue.isNotEmpty() -> "A continuación • ${queue.first().title}"
                     else -> "A continuación • Fin de la lista"
@@ -454,22 +458,47 @@ fun ExpandedPlayerView(
                             )
                         }
 
-                        // Switch Radio Infinita
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = "Radio Infinita",
-                                color = TextSecondary,
-                                fontSize = 13.sp,
-                                modifier = Modifier.padding(end = 8.dp)
-                            )
-                            Switch(
-                                checked = isInfiniteRadioEnabled,
-                                onCheckedChange = onToggleInfiniteRadio,
-                                colors = SwitchDefaults.colors(
-                                    checkedThumbColor = OledBlack,
-                                    checkedTrackColor = MaterialTheme.colorScheme.primary
+                        // Switch Radio Infinita o Insignia DJ Aura
+                        if (isDjAuraMode) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(Color(0xFF1F1128))
+                                    .border(1.dp, Color(0xFFE94057).copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Headphones,
+                                    contentDescription = null,
+                                    tint = Color(0xFF00E5FF),
+                                    modifier = Modifier.size(15.dp)
                                 )
-                            )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Sesión con Dj Aura",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        } else {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "Radio Infinita",
+                                    color = TextSecondary,
+                                    fontSize = 13.sp,
+                                    modifier = Modifier.padding(end = 8.dp)
+                                )
+                                Switch(
+                                    checked = isInfiniteRadioEnabled,
+                                    onCheckedChange = onToggleInfiniteRadio,
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = OledBlack,
+                                        checkedTrackColor = MaterialTheme.colorScheme.primary
+                                    )
+                                )
+                            }
                         }
                     }
 
@@ -492,7 +521,8 @@ fun ExpandedPlayerView(
                         LazyColumn(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .weight(1f)
+                                .weight(1f),
+                            contentPadding = PaddingValues(top = 4.dp, bottom = 80.dp)
                         ) {
                             itemsIndexed(queue) { index, queueSong ->
                                 val isCurrent = queueSong.id == song.id

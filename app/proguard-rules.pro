@@ -18,3 +18,7 @@
 -keep class com.aura.music.core.license.LicenseValidator {
     public java.lang.String validateSerial(java.lang.String, java.lang.String);
 }
+
+# DJ Aura & Gemini Models
+-keep class com.aura.music.data.gemini.** { *; }
+

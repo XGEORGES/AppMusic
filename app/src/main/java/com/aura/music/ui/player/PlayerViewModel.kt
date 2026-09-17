@@ -26,6 +26,8 @@ open class PlayerViewModel @Inject constructor(
     val repeatMode: StateFlow<Int> = playerRepository.repeatMode
     val shuffleModeEnabled: StateFlow<Boolean> = playerRepository.shuffleModeEnabled
     val isInfiniteRadioEnabled: StateFlow<Boolean> = playerRepository.isInfiniteRadioEnabled
+    val isDjAuraMode: StateFlow<Boolean> = playerRepository.isDjAuraMode
+    val quickSkipCount: StateFlow<Int> = playerRepository.quickSkipCount
 
     private val _isExpanded = MutableStateFlow(false)
     val isExpanded: StateFlow<Boolean> = _isExpanded.asStateFlow()
@@ -117,5 +119,13 @@ open class PlayerViewModel @Inject constructor(
 
     fun setInfiniteRadioEnabled(enabled: Boolean) {
         playerRepository.setInfiniteRadioEnabled(enabled)
+    }
+
+    fun setDjAuraMode(enabled: Boolean) {
+        playerRepository.setDjAuraMode(enabled)
+    }
+
+    fun resetQuickSkipCount() {
+        playerRepository.resetQuickSkipCount()
     }
 }

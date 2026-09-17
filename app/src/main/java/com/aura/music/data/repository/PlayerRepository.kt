@@ -25,7 +25,8 @@ import javax.inject.Singleton
 open class PlayerRepository @Inject constructor(
     private val songDao: SongDao,
     private val audioPlayerManager: AudioPlayerManager,
-    private val youTubeMusicSource: YouTubeMusicSource
+    private val youTubeMusicSource: YouTubeMusicSource,
+    private val djAuraRepositoryLazy: dagger.Lazy<DjAuraRepository>
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -40,9 +41,112 @@ open class PlayerRepository @Inject constructor(
     val shuffleModeEnabled: StateFlow<Boolean> = audioPlayerManager.shuffleModeEnabled
     val isInfiniteRadioEnabled: StateFlow<Boolean> = audioPlayerManager.isInfiniteRadioEnabled
 
+    private val _isDjAuraMode = MutableStateFlow(false)
+    val isDjAuraMode: StateFlow<Boolean> = _isDjAuraMode.asStateFlow()
+
+    private val _quickSkipCount = MutableStateFlow(0)
+    val quickSkipCount: StateFlow<Int> = _quickSkipCount.asStateFlow()
+
     private var isFetchingRadio = false
     private var lastErrorSongId: String? = null
     private var errorRetryCount = 0
+
+    var onSongSkipped: ((SongEntity) -> Unit)? = null
+
+    // ─── DJ Aura: extensión automática desde scope del Repository ─────────────
+    // La extensión vive aquí (no en el ViewModel) para que funcione
+    // incluso cuando MIUI destruye la Activity/ViewModel en background.
+    private var isExtendingDj = false
+    private var extendDjStartTimeMs = 0L
+
+    sealed interface DjExtendEvent {
+        data object Loading : DjExtendEvent
+        data class SongsAdded(
+            val songs: List<SongEntity>,
+            val shoutout: String,
+            val comment: String,
+            val vibeTag: String
+        ) : DjExtendEvent
+        data class Error(val message: String) : DjExtendEvent
+    }
+
+    private val _djExtendEvent = kotlinx.coroutines.flow.MutableSharedFlow<DjExtendEvent>(
+        extraBufferCapacity = 1,
+        onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST
+    )
+    val djExtendEvent: kotlinx.coroutines.flow.SharedFlow<DjExtendEvent> = _djExtendEvent
+
+    /**
+     * Dispara la extensión automática de la sesión DJ Aura.
+     * Ejecuta en el scope del Repository (independiente del ViewModel).
+     * Si ya hay una extensión en curso y no ha excedido el timeout, no hace nada.
+     */
+    fun triggerDjExtend() {
+        if (isExtendingDj) {
+            // Guard: si la flag lleva más de 90 segundos en true, resetear
+            val elapsed = System.currentTimeMillis() - extendDjStartTimeMs
+            if (elapsed < 90_000L) return
+            isExtendingDj = false
+        }
+
+        isExtendingDj = true
+        extendDjStartTimeMs = System.currentTimeMillis()
+
+        scope.launch {
+            try {
+                val djRepo = djAuraRepositoryLazy.get()
+                _djExtendEvent.tryEmit(DjExtendEvent.Loading)
+
+                djRepo.extendMix().collect { progress ->
+                    when (progress) {
+                        is DjProgress.Loading -> {
+                            // Loading ya emitido
+                        }
+                        is DjProgress.FirstSongReady -> {
+                            val currentQueueIds = queue.value.map { it.id }.toSet()
+                            if (progress.firstSong.id !in currentQueueIds) {
+                                addToQueue(progress.firstSong)
+                            }
+                            // Si el player terminó la cola, reproducir esta canción de inmediato
+                            if (audioPlayerManager.player.playbackState == Player.STATE_ENDED) {
+                                playSong(progress.firstSong)
+                            }
+                        }
+                        is DjProgress.FullMixReady -> {
+                            val currentQueueIds = queue.value.map { it.id }.toSet()
+                            val newSongs = progress.songs.filter { it.id !in currentQueueIds }
+                            if (newSongs.isNotEmpty()) {
+                                addToQueue(newSongs)
+                                // Si el player terminó antes de que llegaran las canciones, reproducir la primera nueva
+                                if (audioPlayerManager.player.playbackState == Player.STATE_ENDED ||
+                                    (!audioPlayerManager.isPlaying.value && !audioPlayerManager.userInitiatedPause)
+                                ) {
+                                    playSong(newSongs.first())
+                                }
+                            }
+                            _djExtendEvent.tryEmit(
+                                DjExtendEvent.SongsAdded(
+                                    songs = newSongs,
+                                    shoutout = progress.shoutout,
+                                    comment = progress.comment,
+                                    vibeTag = progress.vibeTag
+                                )
+                            )
+                            isExtendingDj = false
+                        }
+                        is DjProgress.Error -> {
+                            _djExtendEvent.tryEmit(DjExtendEvent.Error(progress.message))
+                            isExtendingDj = false
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                _djExtendEvent.tryEmit(DjExtendEvent.Error(e.message ?: "Error al extender sesión DJ"))
+                isExtendingDj = false
+            }
+        }
+    }
 
     val queue: StateFlow<List<SongEntity>> = audioPlayerManager.queue
         .map { list -> list.map { it.toEntity() } }
@@ -93,6 +197,10 @@ open class PlayerRepository @Inject constructor(
                 val currentIndex = currentQueue.indexOfFirst { it.id == songItem.id }
                 if (currentIndex != -1) {
                     preloadStreams(currentQueue, priorityIndex = currentIndex + 1)
+
+                    if (_isDjAuraMode.value && currentQueue.size > 1 && currentIndex >= currentQueue.size - 1) {
+                        triggerDjExtend()
+                    }
                 }
             }
         }
@@ -129,9 +237,13 @@ open class PlayerRepository @Inject constructor(
             }
         }
 
-        // Configurar callback de Radio Infinita
+        // Configurar callback de Radio Infinita (desactivada en modo DJ Aura para mantener coherencia temática)
         audioPlayerManager.onInfiniteRadioTriggered = { lastSongId ->
-            if (!isFetchingRadio) {
+            if (_isDjAuraMode.value) {
+                if (queue.value.size > 1) {
+                    triggerDjExtend()
+                }
+            } else if (!isFetchingRadio) {
                 isFetchingRadio = true
                 scope.launch(Dispatchers.IO) {
                     try {
@@ -264,6 +376,17 @@ open class PlayerRepository @Inject constructor(
             return
         }
 
+        val previousSong = _currentPlayingSong.value
+        if (_isDjAuraMode.value && previousSong != null && previousSong.id != song.id) {
+            val playedDuration = playbackPosition.value
+            if (playedDuration < 60_000L) {
+                _quickSkipCount.value += 1
+                onSongSkipped?.invoke(previousSong)
+            } else {
+                _quickSkipCount.value = 0
+            }
+        }
+
         _currentPlayingSong.value = song
 
         val item = SongItem.fromEntity(song)
@@ -379,8 +502,21 @@ open class PlayerRepository @Inject constructor(
         audioPlayerManager.addNextToQueue(items)
     }
 
+    open fun replaceUpcomingQueue(songs: List<SongEntity>) {
+        val items = songs.map { SongItem.fromEntity(it) }
+        audioPlayerManager.replaceUpcomingQueue(items)
+        preloadStreams(songs, priorityIndex = 0)
+    }
+
     open fun addToQueue(song: SongEntity) {
         audioPlayerManager.addToQueue(SongItem.fromEntity(song))
+    }
+
+    open fun addToQueue(songs: List<SongEntity>) {
+        if (songs.isEmpty()) return
+        val items = songs.map { SongItem.fromEntity(it) }
+        audioPlayerManager.addToQueue(items)
+        preloadStreams(songs, priorityIndex = 0)
     }
 
     open fun startMix(song: SongEntity) {
@@ -456,13 +592,29 @@ open class PlayerRepository @Inject constructor(
     open fun seekToNext() {
         val q = queue.value
         val current = currentPlayingSong.value
+
+        if (_isDjAuraMode.value && current != null) {
+            val playedDuration = playbackPosition.value
+            if (playedDuration < 60_000L) {
+                _quickSkipCount.value += 1
+                onSongSkipped?.invoke(current)
+            } else {
+                _quickSkipCount.value = 0
+            }
+        }
+
         val nextIndex = if (current != null) q.indexOfFirst { it.id == current.id } + 1 else 0
         if (nextIndex in q.indices) {
             playSong(q[nextIndex])
+            if (_isDjAuraMode.value && q.size > 1 && nextIndex >= q.size - 1) {
+                triggerDjExtend()
+            }
+        } else if (_isDjAuraMode.value) {
+            triggerDjExtend()
         } else if (audioPlayerManager.repeatMode.value == androidx.media3.common.Player.REPEAT_MODE_ALL && q.isNotEmpty()) {
             // Repetir toda la lista desde el principio únicamente con REPEAT_MODE_ALL
             playSong(q.first())
-        } else if (audioPlayerManager.isInfiniteRadioEnabled.value && current != null) {
+        } else if (audioPlayerManager.isInfiniteRadioEnabled.value && !_isDjAuraMode.value && current != null) {
             // Fin de la cola con Radio Infinita: traer canciones recomendadas y continuar sin repetir
             audioPlayerManager.prepareForLoading(SongItem.fromEntity(current), resetPosition = false)
             scope.launch(Dispatchers.IO) {
@@ -528,5 +680,17 @@ open class PlayerRepository @Inject constructor(
 
     open fun setInfiniteRadioEnabled(enabled: Boolean) {
         audioPlayerManager.setInfiniteRadioEnabled(enabled)
+    }
+
+    open fun setDjAuraMode(enabled: Boolean) {
+        _isDjAuraMode.value = enabled
+        if (!enabled) {
+            _quickSkipCount.value = 0
+            isExtendingDj = false
+        }
+    }
+
+    open fun resetQuickSkipCount() {
+        _quickSkipCount.value = 0
     }
 }

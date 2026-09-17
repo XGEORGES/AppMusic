@@ -9,6 +9,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.core.content.ContextCompat
+import com.aura.music.core.util.BatteryOptimizationHelper
 import com.aura.music.ui.RootScreen
 import com.aura.music.ui.explore.ExploreViewModel
 import com.aura.music.ui.library.LibraryViewModel
@@ -29,12 +30,13 @@ class MainActivity : ComponentActivity() {
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { _ ->
-        // Si el usuario acepta o rechaza, la app continúa
-    }
+    ) { _ -> }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Limpiar cualquier notificación remanente de guías anteriores
+        BatteryOptimizationHelper.dismissGuideNotification(this)
 
         // Solicitar permiso de notificaciones en Android 13 (Tiramisu, API 33) o superior
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -46,6 +48,7 @@ class MainActivity : ComponentActivity() {
                 requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
+
         setContent {
             GeorgeMusicTheme {
                 RootScreen(
@@ -57,5 +60,11 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Asegurar que no quede ninguna notificación de guía activa
+        BatteryOptimizationHelper.dismissGuideNotification(this)
     }
 }

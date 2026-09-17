@@ -62,10 +62,10 @@ class AudioPlayerManager(
             .setDataSourceFactory(resolvingFactory)
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                1500, // minBufferMs (>= bufferForPlaybackAfterRebufferMs)
-                25000, // maxBufferMs
-                500,  // bufferForPlaybackMs (empieza en 0.5s de buffer)
-                1000  // bufferForPlaybackAfterRebufferMs (1.0s)
+                15_000, // minBufferMs: 15s (antes 1.5s — insuficiente en redes celulares)
+                50_000, // maxBufferMs: 50s de buffer máximo
+                1_500,  // bufferForPlaybackMs: empezar en 1.5s de buffer
+                3_000   // bufferForPlaybackAfterRebufferMs: 3s tras re-buffering
             )
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
@@ -121,11 +121,82 @@ class AudioPlayerManager(
     var onSongEndedTriggered: (() -> Unit)? = null
     var onPlayerErrorTriggered: ((song: SongItem, error: PlaybackException) -> Unit)? = null
 
+    // ─── Tracking de pausa del usuario vs pausa del sistema ────────────────────
+    // Distingue si la pausa fue explícita del usuario (botón play/pause) o
+    // causada por el sistema (pérdida de audio focus, MIUI SmartPower, etc.)
+    @Volatile
+    var userInitiatedPause: Boolean = false
+        private set
+
+    // ─── Auto-resume cuando el sistema causa una pausa inesperada ──────────────
+    private var autoResumeRunnable: Runnable? = null
+    private var autoResumeRetryCount = 0
+    private val MAX_AUTO_RESUME_RETRIES = 5
+
+    /**
+     * Programa un reintento automático de reproducción cuando el playback se detuvo
+     * sin acción del usuario (ej. audio focus denegado por MIUI).
+     */
+    fun scheduleAutoResume() {
+        if (userInitiatedPause) return
+        if (!player.playWhenReady) return
+        // No reintentar si la cola terminó de verdad
+        if (player.playbackState == Player.STATE_ENDED && !player.hasNextMediaItem()) return
+        // No reintentar si no hay contenido cargado
+        if (player.mediaItemCount == 0) return
+
+        autoResumeRetryCount++
+        if (autoResumeRetryCount > MAX_AUTO_RESUME_RETRIES) {
+            autoResumeRetryCount = 0
+            return
+        }
+
+        // Backoff: 3s, 6s, 9s, 12s, 15s
+        val delayMs = (autoResumeRetryCount * 3000L).coerceAtMost(15000L)
+        cancelAutoResume()
+        autoResumeRunnable = Runnable {
+            if (!player.isPlaying && !userInitiatedPause && player.playWhenReady &&
+                (player.playbackState == Player.STATE_READY ||
+                 player.playbackState == Player.STATE_BUFFERING ||
+                 player.playbackState == Player.STATE_IDLE)
+            ) {
+                ensureServiceStarted()
+                if (player.playbackState == Player.STATE_IDLE) {
+                    player.prepare()
+                }
+                player.play()
+            }
+        }
+        mainHandler.postDelayed(autoResumeRunnable!!, delayMs)
+    }
+
+    fun cancelAutoResume() {
+        autoResumeRunnable?.let { mainHandler.removeCallbacks(it) }
+        autoResumeRunnable = null
+    }
+
     private val playerListener = object : Player.Listener {
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            if (!playWhenReady) {
+                userInitiatedPause = true
+                cancelAutoResume()
+            }
+        }
+
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             _isPlaying.value = isPlaying
             if (isPlaying) {
                 _isLoading.value = false
+                cancelAutoResume()
+                autoResumeRetryCount = 0
+            } else {
+                if (!player.playWhenReady) {
+                    userInitiatedPause = true
+                    cancelAutoResume()
+                } else if (!userInitiatedPause) {
+                    // Pausa causada por el sistema (audio focus denegado, MIUI, etc.)
+                    scheduleAutoResume()
+                }
             }
         }
 
@@ -247,6 +318,7 @@ class AudioPlayerManager(
     }
 
     fun setQueue(songs: List<SongItem>, startIndex: Int = 0, autoPlay: Boolean = true) {
+        if (autoPlay) userInitiatedPause = false
         _queue.value = songs
         val mediaItems = songs.map { songToMediaItem(it) }
         player.setMediaItems(mediaItems, startIndex, 0L)
@@ -286,7 +358,35 @@ class AudioPlayerManager(
         player.addMediaItems(insertIndex, mediaItems)
     }
 
+    fun replaceUpcomingQueue(songs: List<SongItem>) {
+        if (songs.isEmpty()) return
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Handler(Looper.getMainLooper()).post { replaceUpcomingQueue(songs) }
+            return
+        }
+        val currentList = _queue.value.toMutableList()
+        val currentIndex = player.currentMediaItemIndex
+        if (currentIndex in currentList.indices) {
+            val keepCount = currentIndex + 1
+            while (player.mediaItemCount > keepCount) {
+                player.removeMediaItem(keepCount)
+            }
+            val remainingQueue = currentList.take(keepCount).toMutableList()
+            remainingQueue.addAll(songs)
+            _queue.value = remainingQueue
+            val mediaItems = songs.map { songToMediaItem(it) }
+            player.addMediaItems(mediaItems)
+        } else {
+            setQueue(songs, 0, autoPlay = true)
+        }
+    }
+
     fun addToQueue(songs: List<SongItem>) {
+        if (songs.isEmpty()) return
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Handler(Looper.getMainLooper()).post { addToQueue(songs) }
+            return
+        }
         val updated = _queue.value.toMutableList()
         updated.addAll(songs)
         _queue.value = updated
@@ -324,11 +424,14 @@ class AudioPlayerManager(
     }
 
     fun play() {
+        userInitiatedPause = false
         ensureServiceStarted()
         player.play()
     }
 
     fun pause() {
+        userInitiatedPause = true
+        cancelAutoResume()
         player.pause()
     }
 
@@ -338,8 +441,11 @@ class AudioPlayerManager(
             return
         }
         if (player.isPlaying) {
+            userInitiatedPause = true
+            cancelAutoResume()
             player.pause()
         } else {
+            userInitiatedPause = false
             ensureServiceStarted()
             player.play()
         }
@@ -382,6 +488,7 @@ class AudioPlayerManager(
     }
 
     fun release() {
+        cancelAutoResume()
         mainHandler.removeCallbacksAndMessages(null)
         player.removeListener(playerListener)
         player.release()
@@ -466,6 +573,7 @@ class AudioPlayerManager(
     }
 
     fun playStream(song: SongItem, streamUrl: String) {
+        userInitiatedPause = false
         ensureServiceStarted()
         _currentSong.value = song
         _currentPosition.value = 0L

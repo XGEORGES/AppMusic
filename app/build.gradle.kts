@@ -5,6 +5,15 @@ plugins {
     alias(libs.plugins.hilt)
 }
 
+import java.util.Properties
+
+val localProperties = Properties()
+val localPropertiesFile = rootProject.file("local.properties")
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.inputStream().use { localProperties.load(it) }
+}
+val geminiApiKey: String = localProperties.getProperty("GEMINI_API_KEY") ?: ""
+
 android {
     namespace = "com.aura.music"
     compileSdk = 35
@@ -13,10 +22,11 @@ android {
         applicationId = "com.aura.music"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "1.5.1"
+        versionCode = 21
+        versionName = "1.6.13"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "GEMINI_API_KEY", "\"$geminiApiKey\"")
     }
 
     signingConfigs {
@@ -29,6 +39,9 @@ android {
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("release")
+        }
         release {
             signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
@@ -47,6 +60,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     packaging {
         resources {
